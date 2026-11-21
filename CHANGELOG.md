@@ -1,3 +1,11 @@
+## 3.3 — IDA Pro 9.5 UI overhaul and built-in MCP server
+
+- Overhaul the native Win32 workspace with the IDA Pro 9.5 dark theme, closeable view tabs (`×` + middle-click), 4-pane owner-drawn status bar, dockable Functions panel enabled by default, register/pseudocode highlighting, double-click/Enter operand navigation, and interactive popups for XREFs (`X` / `Ctrl+J`), bookmarks (`Ctrl+M`), and segments (`Ctrl+Alt+S`), plus standard shortcuts (`G`, `F5`, `Tab`, `Space`, `Esc`, `Home`).
+- Integrate the fixed Streamable HTTP/1.1 + JSON-RPC 2.0 MCP server directly into `gandon_gui` (`Tools -> MCP Server (Built-in)`, port `8766`, 25 `gandon_*` tools, optional Bearer token auth, deadlock-free UI-thread marshalling and clean shutdown), disabling `gandon_mcp_plugin` by default.
+- Fix non-Unicorn (`#else`) fallback build in `Emulator::step_over` and add `gandon_mcp_tests` to CTest.
+
+Validation: x64 Release GUI/CLI built with Capstone + Unicorn (`x86;aarch64`); CTest 5/5 passed (including `gandon_mcp_tests`); `gandon_types_tests` passed.
+
 ## 3.2 — live process tools and optional ScyllaHide
 
 - Add cancellable pointer scanning/re-scan and typed/raw structure snapshots.

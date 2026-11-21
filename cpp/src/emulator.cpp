@@ -3103,6 +3103,7 @@ EmulationResult Emulator::step() {
 
 EmulationResult Emulator::step_over(std::size_t instruction_limit, std::uint64_t timeout_microseconds) {
     if (!ready()) return {EmulationStop::Error, 0, 0, impl_ ? impl_->error : "Emulator is not initialized."};
+#if defined(GANDON_HAS_UNICORN)
     if (impl_->guest_exited) return {EmulationStop::Exited, 0, impl_->guest_exit_pc, {}};
     if (!instruction_limit) return {EmulationStop::InstructionLimit, 0, 0, {}};
 
@@ -3189,6 +3190,11 @@ EmulationResult Emulator::step_over(std::size_t instruction_limit, std::uint64_t
         result.program_counter == return_address)
         result.stop = EmulationStop::Paused;
     return result;
+#else
+    (void)instruction_limit;
+    (void)timeout_microseconds;
+    return {EmulationStop::Error, 0, 0, impl_->error};
+#endif
 }
 
 EmulationResult Emulator::step_out(std::size_t instruction_limit, std::uint64_t timeout_microseconds) {

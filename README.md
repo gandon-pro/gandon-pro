@@ -6,7 +6,7 @@ The project is designed for investigating compiled programs, understanding their
 
 Gandon-PRO reads PE and ELF files. Capstone provides instruction decoding for supported architectures, including x86, x86-64, ARM, and ARM64. Architecture support varies between disassembly, decompilation, emulation, and live debugging; the Windows debugger and live-memory tools target x86/x64 processes.
 
-[Download](https://github.com/gandon-pro/gandon-pro.github.io/releases) · [Source](https://github.com/gandon-pro/gandon-pro.github.io/tree/main/cpp) · [Changelog](CHANGELOG.md) · [Report an issue](https://github.com/gandon-pro/gandon-pro.github.io/issues)
+[Website](https://gandon-pro.github.io/) · [Download](https://github.com/gandon-pro/gandon-pro/releases) · [Source](https://github.com/gandon-pro/gandon-pro/tree/main/cpp) · [Changelog](CHANGELOG.md) · [Report an issue](https://github.com/gandon-pro/gandon-pro/issues)
 
 ## Capabilities
 
@@ -25,7 +25,7 @@ Gandon-PRO reads PE and ELF files. Capstone provides instruction decoding for su
 To install a pre-built Windows x64 release:
 
 1. Install the Microsoft Visual C++ x64 runtime if it is not already available.
-2. Download `gandon-pro-<version>-win64.zip` from the [Releases page](https://github.com/gandon-pro/gandon-pro.github.io/releases).
+2. Download `gandon-pro-<version>-win64.zip` from the [Releases page](https://github.com/gandon-pro/gandon-pro/releases).
 3. Extract the archive into a new directory, keeping its folder structure intact.
 4. Launch `gandon_gui.exe` and approve the Windows administrator prompt.
 5. Choose whether to use the optional GandonMemory driver. Select **No** to continue with ordinary process-memory access.
@@ -78,8 +78,8 @@ The 3.2 release was built with MSVC 2026, Capstone 5.0.9, and Unicorn 2.1.4. The
 ### Get the source
 
 ```powershell
-git clone https://github.com/gandon-pro/gandon-pro.github.io.git
-cd gandon-pro.github.io
+git clone https://github.com/gandon-pro/gandon-pro.git
+cd gandon-pro
 ```
 
 Alternatively, download and extract a source archive from GitHub, then open a terminal in its root directory.
@@ -128,13 +128,13 @@ The CTest suite covers core analysis, decompilation, unpacking/RTTI helpers, and
 
 | Executable | Purpose |
 |---|---|
-| `gandon_gui` | Native Windows desktop interface. |
+| `gandon_gui` | Native Windows desktop interface (IDA-style workspace + built-in MCP HTTP server on port `8766`). |
 | `gandon_cli` | Binary loading, basic analysis information, and entry-point disassembly. |
 | `gandon_decompile` | Command-line decompilation. |
 | `gandon_auto` | Automated analysis and signature-related workflows. |
 | `gandon_diff` | Function-level comparison between binaries. |
 | `gandon_ida_views` | Text representations of analysis results. |
-| `gandon_mcp_backend` | Native backend used by the MCP integration. |
+| `gandon_mcp_backend` | Standalone native CLI backend for headless MCP integrations. |
 
 For example:
 
@@ -142,13 +142,15 @@ For example:
 .\build\Release\gandon_cli.exe C:\path\to\program.exe
 ```
 
-### Scripts and plugins
+### Scripts, built-in MCP server, and plugins
+
+`gandon_gui` includes a built-in Streamable HTTP/1.1 MCP server (`Tools -> MCP Server (Built-in)`, default `http://127.0.0.1:8766/mcp`, exposing 25 `gandon_*` analysis, decompilation, patching, database, and UI navigation tools with optional Bearer token authentication). No external MCP plugin DLL is required.
 
 Native extensions use the [plugin API](cpp/include/gandon/plugin_api.h). An [example plugin](cpp/plugins/example_plugin.cpp) is included in the source tree.
 
 Python plugins live under [`cpp/plugins/python`](cpp/plugins/python). Plugins that use Qt interfaces run through the separate Python plugin host rather than embedding a Python runtime into the native executable.
 
-For MCP tools and configuration, see the [MCP documentation](cpp/mcp/README.md).
+For standalone MCP wrapper tools and client configuration examples, see [`cpp/mcp/README.md`](cpp/mcp/README.md).
 
 ### Source layout
 
@@ -172,7 +174,7 @@ For release 3.2, the x64 GUI and CLI compiled successfully; all four CTest cases
 
 ## Contribute
 
-Bug reports, reproducible examples, and focused fixes are welcome through [GitHub Issues](https://github.com/gandon-pro/gandon-pro.github.io/issues) and pull requests.
+Bug reports, reproducible examples, and focused fixes are welcome through [GitHub Issues](https://github.com/gandon-pro/gandon-pro/issues) and pull requests.
 
 When reporting a problem, include the application version, Windows version, target architecture, expected behavior, and the relevant error output. For code changes, describe the problem being fixed and the checks used to validate it.
 

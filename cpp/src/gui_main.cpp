@@ -12,6 +12,7 @@
 #include "gandon/driver.hpp"
 #include "gandon/live_process.hpp"
 #include "gandon/driver_setup.hpp"
+#include "gandon/mcp_server.hpp"
 
 #include <windows.h>
 #include <tlhelp32.h>
@@ -66,7 +67,7 @@ constexpr int ID_SAVE_DB = 1301, ID_LOAD_DB = 1302, ID_APPLY_PATCHES = 1303, ID_
 constexpr int ID_RENAME_LABEL = 1310, ID_ADD_COMMENT = 1311, ID_NOP_BLOCK = 1312, ID_EDIT_INSTRUCTION = 1313, ID_UNDO_PATCH = 1314, ID_REDO_PATCH = 1315, ID_ASSIGN_TYPE = 1316;
 constexpr int ID_DECOMPILE = 1320, ID_SIGMAKER = 1321, ID_SEARCH_SIGNATURE = 1322, ID_CALL_GRAPH = 1323, ID_MEMORY_VIEW = 1324, ID_WATCH_LOCALS = 1325, ID_CALL_STACK = 1326, ID_COMPARE = 1327, ID_PY_CONSOLE = 1328, ID_SEARCH = 1329;
 constexpr int ID_JUMP_BACK = 1330, ID_TOGGLE_BOOKMARK = 1331, ID_NEXT_BOOKMARK = 1332, ID_EXPORT_JSON = 1333, ID_EXPORT_BREAKPOINTS = 1334, ID_EXPORT_DEBUG_LOG = 1335, ID_JUMP_ADDR = 1336, ID_JUMP_FORWARD = 1359;
-constexpr int ID_LIST_XREFS = 1336, ID_SEARCH_PROCESS_MEMORY = 1337, ID_FIND_FUNCTION = 1338, ID_HIDE_FUNCTION = 1339;
+constexpr int ID_LIST_XREFS = 1434, ID_XREFS_FROM = 1435, ID_SEARCH_PROCESS_MEMORY = 1337, ID_FIND_FUNCTION = 1338, ID_HIDE_FUNCTION = 1339;
 constexpr int ID_RUN = 1340, ID_STEP_INTO = 1341, ID_STEP_OVER = 1342, ID_TOGGLE_BP = 1343, ID_COND_BP = 1344, ID_CONFIG_BP = 1345, ID_BP_MANAGER = 1346, ID_HW_BP = 1347, ID_DELETE_BP = 1348, ID_STOP = 1349;
 constexpr int ID_ANTI_DEBUG = 1350;
 constexpr int ID_POINTER_SCAN = 1427, ID_POINTER_RESCAN = 1428, ID_STRUCT_DUMP = 1429;
@@ -77,7 +78,10 @@ constexpr int ID_HIDE_IMPORT = 1355;
 constexpr int ID_MEMORY_SNAPSHOT = 1356, ID_MEMORY_COMPARE = 1357;
 constexpr int ID_PAUSE = 1358;
 constexpr int ID_VIEW_GRAPH = 1360, ID_VIEW_LISTING = 1361, ID_VIEW_PSEUDO = 1362, ID_VIEW_DEBUGGER = 1363, ID_VIEW_HEX = 1364, ID_VIEW_TYPES = 1365, ID_VIEW_IMPORTS = 1366, ID_VIEW_EXPORTS = 1367, ID_VIEW_STRINGS = 1368, ID_VIEW_RESOURCES = 1369, ID_VIEW_SYMBOLS = 1370, ID_VIEW_MEMORY = 1371, ID_VIEW_PROBLEMS = 1372, ID_GRAPH_COLLAPSE = 1373, ID_GRAPH_EXPAND_ALL = 1374, ID_ABOUT = 1380;
-constexpr int ID_TOGGLE_GRAPH_LIST = 1373, ID_FIT_GRAPH = 1374, ID_TOGGLE_MINIMAP = 1375;
+constexpr int ID_TOGGLE_GRAPH_LIST = 1436, ID_FIT_GRAPH = 1437, ID_TOGGLE_MINIMAP = 1375;
+constexpr int ID_SWITCH_PSEUDO_DISASM = 1438, ID_BOOKMARKS_POPUP = 1439, ID_JUMP_SEGMENT = 1440, ID_SEARCH_BYTES = 1441;
+constexpr int ID_FOLLOW_CURSOR_ENTER = 1442;
+constexpr int ID_MCP_TOGGLE = 1480, ID_MCP_CONFIG = 1481, ID_MCP_COPY_URL = 1482, ID_MCP_COPY_CONFIG = 1483, ID_MCP_STATUS = 1484;
 constexpr int ID_PATHFINDER = 1376;
 constexpr int ID_EMULATE = 1377, ID_EMULATE_STEP = 1378, ID_EMULATE_RESET = 1379;
 constexpr int ID_EMULATE_BREAKPOINT = 1381;
@@ -110,18 +114,31 @@ constexpr int ID_TREE = 1101;
 constexpr int ID_EDITOR = 1102;
 constexpr int ID_STATUS = 1103;
 
-// ---- Theme: IDA 9 dark by default, "--light" selects the classic light palette ----
-bool g_light_theme = false;   // IDA 9 dark by default; "--light" selects the classic light palette
+// ---- Theme: IDA Pro 9.5 dark by default, "--light" selects the classic light palette ----
+bool g_light_theme = false;   // IDA Pro 9.5 dark by default; "--light" selects the classic light palette
 inline COLORREF themed_color(COLORREF c) {
     if (!g_light_theme) {
-        // IDA 9.x dark: neutral grays (#363636 background, #DDDDDD text).
+        // IDA Pro 9.5 dark palette: #1E1F22 canvas/editor, #25262A panels, #2B2D30 chrome, #3574F0 accent, #43454A borders.
         static const std::unordered_map<COLORREF, COLORREF> dark_table = {
-            {RGB(24, 27, 32), RGB(54, 54, 54)},   {RGB(30, 34, 40), RGB(66, 66, 66)},    {RGB(18, 22, 27), RGB(44, 44, 44)},
-            {RGB(16, 19, 24), RGB(48, 48, 48)},   {RGB(215, 228, 238), RGB(221, 221, 221)}, {RGB(225, 235, 242), RGB(240, 240, 240)},
-            {RGB(155, 170, 184), RGB(165, 165, 165)}, {RGB(170, 185, 198), RGB(190, 190, 190)},
-            {RGB(32, 39, 47), RGB(46, 46, 46)},   {RGB(36, 57, 66), RGB(58, 70, 88)},    {RGB(62, 78, 91), RGB(125, 125, 125)},
-            {RGB(52, 64, 74), RGB(90, 90, 90)},   {RGB(88, 108, 128), RGB(110, 110, 110)}, {RGB(18, 29, 38), RGB(44, 44, 44)},
-            {RGB(48, 48, 52), RGB(80, 80, 80)},   {RGB(125, 138, 150), RGB(150, 150, 150)},
+            {RGB(24, 27, 32), RGB(30, 31, 34)},       // main canvas / editor (#1E1F22)
+            {RGB(30, 34, 40), RGB(37, 38, 42)},       // panels / active tab (#25262A)
+            {RGB(18, 22, 27), RGB(43, 45, 48)},       // chrome / inactive strip (#2B2D30)
+            {RGB(16, 19, 24), RGB(30, 31, 34)},       // minimap / deep surface (#1E1F22)
+            {RGB(215, 228, 238), RGB(223, 225, 229)}, // primary text (#DFE1E5)
+            {RGB(225, 235, 242), RGB(240, 242, 245)}, // bright active text
+            {RGB(155, 170, 184), RGB(145, 149, 158)}, // muted text
+            {RGB(170, 185, 198), RGB(175, 179, 188)}, // secondary text
+            {RGB(32, 39, 47), RGB(37, 39, 44)},       // CFG block fill (#25272C)
+            {RGB(36, 57, 66), RGB(44, 61, 88)},       // active CFG block fill
+            {RGB(62, 78, 91), RGB(78, 81, 87)},       // node border (#4E5157)
+            {RGB(52, 64, 74), RGB(67, 69, 74)},       // 1px dividers (#43454A)
+            {RGB(88, 108, 128), RGB(95, 102, 114)},   // minimap nodes
+            {RGB(18, 29, 38), RGB(43, 45, 48)},       // block header / strip (#2B2D30)
+            {RGB(48, 48, 52), RGB(67, 69, 74)},       // inactive control border
+            {RGB(125, 138, 150), RGB(136, 142, 153)}, // address prefix
+            {RGB(0, 122, 204), RGB(53, 116, 240)},    // IDA 9.5 blue accent (#3574F0)
+            {RGB(0, 160, 210), RGB(75, 145, 255)},    // active focus border
+            {RGB(0, 139, 190), RGB(53, 116, 240)},    // minimap active block
         };
         const auto found = dark_table.find(c);
         return found == dark_table.end() ? c : found->second;
@@ -300,7 +317,37 @@ void gui_auto_analysis(gandon::AnalysisDatabase& db);
 void output_log(const std::wstring& line);
 std::set<std::uint64_t> g_noreturn;
 std::wstring g_auto_analysis_summary;
+enum class ViewKind {
+    ViewA, Pseudocode, Hex, Imports, Exports, Strings,
+    LocalTypes, Resources, Symbols, MemoryMap, Problems, Debugger, Llil
+};
+bool g_view_a_graph_mode = true;
+std::vector<ViewKind> g_open_tabs = { ViewKind::ViewA, ViewKind::Hex, ViewKind::Imports, ViewKind::Exports };
+std::vector<RECT> g_tab_close_rects;
+int g_hover_close_tab = -1;
+std::atomic_bool g_ui_shutting_down{false};
+gandon::McpServer g_mcp_server;
+gandon::McpServerConfig g_mcp_config;
+
+ViewKind active_view_kind();
+int active_legacy_tab();
+bool is_graph_view_active();
+void open_or_focus_view(HWND window, ViewKind kind);
+void close_tab(HWND window, int index);
+void rebuild_tab_strip();
+void set_editor_text();
 void select_view(HWND window, int tab);
+void show_xrefs_popup(HWND window, bool prefer_from = false);
+void show_bookmarks_popup(HWND window);
+void show_segments_popup(HWND window);
+void follow_operand_at_cursor(HWND window);
+void update_status_bar_panes();
+void mcp_start_server(HWND window);
+void mcp_toggle_server(HWND window);
+void mcp_configure_dialog(HWND window);
+void mcp_copy_url(HWND window);
+void mcp_copy_client_config(HWND window);
+void mcp_show_status(HWND window);
 void py_console_log(const std::wstring& text);
 void py_console_log_command(int id);
 void functions_window(HWND owner);
@@ -1242,19 +1289,52 @@ std::optional<std::uint64_t> nav_address_at(int x, int width) {
 LRESULT CALLBACK dark_background_subclass(HWND window, UINT message, WPARAM wparam, LPARAM lparam, UINT_PTR id, DWORD_PTR) {
     if (message == WM_ERASEBKGND) {
         RECT client{}; GetClientRect(window, &client);
-        HBRUSH brush = CreateSolidBrush(THEMED_RGB(24, 27, 32));
+        HBRUSH brush = CreateSolidBrush(THEMED_RGB(18, 22, 27));
         FillRect(reinterpret_cast<HDC>(wparam), &client, brush); DeleteObject(brush);
         return 1;
     }
+    if (id == 2 && message == WM_MOUSEMOVE) {
+        TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, window, 0};
+        TrackMouseEvent(&tme);
+        const POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        int hit = -1;
+        for (std::size_t i = 0; i < g_tab_close_rects.size(); ++i) {
+            if (i > 0 && PtInRect(&g_tab_close_rects[i], pt)) { hit = static_cast<int>(i); break; }
+        }
+        if (hit != g_hover_close_tab) { g_hover_close_tab = hit; InvalidateRect(window, nullptr, FALSE); }
+    }
+    if (id == 2 && message == WM_MOUSELEAVE) {
+        if (g_hover_close_tab != -1) { g_hover_close_tab = -1; InvalidateRect(window, nullptr, FALSE); }
+    }
+    if (id == 2 && message == WM_LBUTTONDOWN) {
+        const POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        for (std::size_t i = 1; i < g_tab_close_rects.size(); ++i) {
+            if (PtInRect(&g_tab_close_rects[i], pt)) {
+                close_tab(g_main_window, static_cast<int>(i));
+                return 0;
+            }
+        }
+    }
+    if (id == 2 && message == WM_MBUTTONUP) {
+        const POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        const int count = TabCtrl_GetItemCount(window);
+        for (int i = 1; i < count; ++i) {
+            RECT rc{};
+            if (TabCtrl_GetItemRect(window, i, &rc) && PtInRect(&rc, pt)) {
+                close_tab(g_main_window, i);
+                return 0;
+            }
+        }
+    }
     if (message == WM_PAINT && id == 2) {
-        // Fully custom tab strip: no system frames, no pane border line.
         PAINTSTRUCT paint{};
         HDC dc = BeginPaint(window, &paint);
         RECT client{}; GetClientRect(window, &client);
-        HBRUSH strip = CreateSolidBrush(THEMED_RGB(24, 27, 32));
+        HBRUSH strip = CreateSolidBrush(THEMED_RGB(18, 22, 27));
         FillRect(dc, &client, strip); DeleteObject(strip);
         const int selected = TabCtrl_GetCurSel(window);
         const int count = TabCtrl_GetItemCount(window);
+        g_tab_close_rects.assign(static_cast<std::size_t>((std::max)(0, count)), RECT{});
         HFONT old_font = reinterpret_cast<HFONT>(SelectObject(dc, g_ui_font));
         SetBkMode(dc, TRANSPARENT);
         for (int index = 0; index < count; ++index) {
@@ -1263,19 +1343,42 @@ LRESULT CALLBACK dark_background_subclass(HWND window, UINT message, WPARAM wpar
             wchar_t label[128]{};
             TCITEMW item{}; item.mask = TCIF_TEXT; item.pszText = label; item.cchTextMax = 128;
             TabCtrl_GetItem(window, index, &item);
+            std::wstring caption = label;
+            while (!caption.empty() && caption.back() == L' ') caption.pop_back();
             const bool active = index == selected;
-            HBRUSH fill = CreateSolidBrush(active ? THEMED_RGB(30, 34, 40) : THEMED_RGB(24, 27, 32));
+            const bool closable = index > 0;
+            HBRUSH fill = CreateSolidBrush(active ? THEMED_RGB(24, 27, 32) : THEMED_RGB(18, 22, 27));
             FillRect(dc, &item_rect, fill); DeleteObject(fill);
             if (active) {
                 RECT underline = item_rect; underline.top = underline.bottom - 2;
                 HBRUSH accent = CreateSolidBrush(THEMED_RGB(0, 122, 204)); FillRect(dc, &underline, accent); DeleteObject(accent);
             }
             RECT separator{item_rect.right - 1, item_rect.top + 4, item_rect.right, item_rect.bottom - 4};
-            if (index != count - 1) { HBRUSH separator_brush = CreateSolidBrush(THEMED_RGB(52, 64, 74)); FillRect(dc, &separator, separator_brush); DeleteObject(separator_brush); }
+            HBRUSH separator_brush = CreateSolidBrush(THEMED_RGB(52, 64, 74)); FillRect(dc, &separator, separator_brush); DeleteObject(separator_brush);
             SetTextColor(dc, active ? THEMED_RGB(225, 235, 242) : THEMED_RGB(155, 170, 184));
             RECT text = item_rect;
-            DrawTextW(dc, label, -1, &text, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX | DT_NOCLIP);
+            text.left += 10;
+            if (closable) text.right -= 20;
+            DrawTextW(dc, caption.c_str(), -1, &text, DT_SINGLELINE | DT_VCENTER | (closable ? DT_LEFT : DT_CENTER) | DT_NOPREFIX);
+            if (closable) {
+                RECT close_rc{item_rect.right - 18, item_rect.top + 5, item_rect.right - 4, item_rect.bottom - 5};
+                g_tab_close_rects[static_cast<std::size_t>(index)] = close_rc;
+                if (g_hover_close_tab == index) {
+                    HBRUSH hbr = CreateSolidBrush(THEMED_RGB(52, 64, 74));
+                    FillRect(dc, &close_rc, hbr); DeleteObject(hbr);
+                }
+                HPEN xpen = CreatePen(PS_SOLID, 1, (g_hover_close_tab == index || active) ? THEMED_RGB(225, 235, 242) : THEMED_RGB(155, 170, 184));
+                HGDIOBJ old_pen = SelectObject(dc, xpen);
+                const int cx = (close_rc.left + close_rc.right) / 2;
+                const int cy = (close_rc.top + close_rc.bottom) / 2;
+                MoveToEx(dc, cx - 3, cy - 3, nullptr); LineTo(dc, cx + 4, cy + 4);
+                MoveToEx(dc, cx + 3, cy - 3, nullptr); LineTo(dc, cx - 4, cy + 4);
+                SelectObject(dc, old_pen); DeleteObject(xpen);
+            }
         }
+        RECT bottom_line{0, client.bottom - 1, client.right, client.bottom};
+        HBRUSH bl = CreateSolidBrush(THEMED_RGB(52, 64, 74));
+        FillRect(dc, &bottom_line, bl); DeleteObject(bl);
         SelectObject(dc, old_font);
         EndPaint(window, &paint);
         return 0;
@@ -1285,7 +1388,7 @@ LRESULT CALLBACK dark_background_subclass(HWND window, UINT message, WPARAM wpar
 
 // Flat 16x16 toolbar icons drawn with GDI in the spirit of IDA's toolbar.
 HIMAGELIST make_ida_toolbar_images() {
-    constexpr int size = 16, count = 7;
+    constexpr int size = 16, count = 11;
     HDC screen = GetDC(nullptr);
     HDC dc = CreateCompatibleDC(screen);
     HBITMAP bitmap = CreateCompatibleBitmap(screen, size * count, size);
@@ -1361,6 +1464,45 @@ HIMAGELIST make_ida_toolbar_images() {
         Rectangle(dc, x + 9, 11, x + 16, 15);
         release();
     }
+    // 7 xrefs: X badge
+    {
+        const int x = size * 7;
+        brush_pen(RGB(53, 86, 138), RGB(115, 165, 240));
+        Rectangle(dc, x + 1, 2, x + 15, 14); release();
+        HPEN xp = CreatePen(PS_SOLID, 2, RGB(240, 200, 95)); HGDIOBJ old = SelectObject(dc, xp);
+        MoveToEx(dc, x + 4, 4, nullptr); LineTo(dc, x + 12, 12);
+        MoveToEx(dc, x + 11, 4, nullptr); LineTo(dc, x + 4, 12);
+        SelectObject(dc, old); DeleteObject(xp);
+    }
+    // 8 functions: fn
+    {
+        const int x = size * 8;
+        brush_pen(RGB(52, 74, 96), RGB(110, 175, 225));
+        Rectangle(dc, x + 1, 2, x + 15, 14); release();
+        HFONT font = CreateFontW(-10, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+        HGDIOBJ old_font = SelectObject(dc, font);
+        SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(150, 220, 240));
+        TextOutW(dc, x + 3, 2, L"fn", 2);
+        SelectObject(dc, old_font); DeleteObject(font);
+    }
+    // 9 strings: "A"
+    {
+        const int x = size * 9;
+        brush_pen(RGB(75, 58, 44), RGB(206, 145, 120));
+        Rectangle(dc, x + 1, 2, x + 15, 14); release();
+        HFONT font = CreateFontW(-9, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+        HGDIOBJ old_font = SelectObject(dc, font);
+        SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(230, 180, 145));
+        TextOutW(dc, x + 2, 2, L"\"A\"", 3);
+        SelectObject(dc, old_font); DeleteObject(font);
+    }
+    // 10 run / debug: green play triangle
+    {
+        const int x = size * 10;
+        brush_pen(RGB(78, 195, 110), RGB(40, 130, 65));
+        const POINT tri[] = {{x + 4, 2}, {x + 13, 8}, {x + 4, 14}};
+        Polygon(dc, tri, 3); release();
+    }
     SelectObject(dc, old_bitmap);
     HIMAGELIST list = ImageList_Create(size, size, ILC_COLOR24 | ILC_MASK, count, 0);
     ImageList_AddMasked(list, bitmap, mask);
@@ -1374,7 +1516,7 @@ LRESULT CALLBACK navband_proc(HWND window, UINT message, WPARAM wparam, LPARAM l
         RECT client{}; GetClientRect(window, &client);
         if (g_database) if (const auto address = nav_address_at(static_cast<int>(static_cast<short>(LOWORD(lparam))), client.right)) {
             g_current_address = *address;
-            if (message == WM_LBUTTONDOWN) navigate_to_address(GetParent(window), *address, TabCtrl_GetCurSel(g_tabs) == 0 ? 0 : 1);
+            if (message == WM_LBUTTONDOWN) navigate_to_address(GetParent(window), *address, is_graph_view_active() ? 0 : 1);
             InvalidateRect(window, nullptr, FALSE);
         }
         return 0;
@@ -1387,7 +1529,14 @@ LRESULT CALLBACK navband_proc(HWND window, UINT message, WPARAM wparam, LPARAM l
         HBRUSH background = CreateSolidBrush(THEMED_RGB(18, 22, 27)); FillRect(dc, &client, background); DeleteObject(background);
         if (g_database && (g_nav_owner != g_database.get() || g_nav_signature != g_database->functions().size())) rebuild_nav_band();
         if (g_database && !g_nav_kind.empty() && client.right > 0) {
-            static const COLORREF colors[] = {THEMED_RGB(150, 140, 120), THEMED_RGB(96, 165, 220), THEMED_RGB(184, 150, 96), THEMED_RGB(102, 204, 204), THEMED_RGB(240, 140, 190), THEMED_RGB(70, 76, 84)};
+            static const COLORREF colors[] = {
+                THEMED_RGB(145, 130, 95),   // unexplored / gap
+                THEMED_RGB(72, 134, 214),   // regular function (IDA blue)
+                THEMED_RGB(185, 148, 86),   // data
+                THEMED_RGB(90, 192, 188),   // strings
+                THEMED_RGB(224, 120, 178),  // imports
+                THEMED_RGB(68, 72, 80)      // uninitialized / bss
+            };
             const int bar_top = 3, bar_bottom = client.bottom - 3;
             for (int x = 0; x < client.right; ++x) {
                 const auto b0 = static_cast<std::size_t>(static_cast<double>(x) * kNavBuckets / client.right);
@@ -1409,10 +1558,10 @@ LRESULT CALLBACK navband_proc(HWND window, UINT message, WPARAM wparam, LPARAM l
                 if (g_current_address < n.begin || g_current_address >= n.begin + n.size) continue;
                 const auto bucket = n.first_bucket + static_cast<std::size_t>((g_current_address - n.begin) * n.buckets / n.size);
                 const int x = static_cast<int>(static_cast<double>(bucket) * client.right / kNavBuckets);
-                HPEN marker = CreatePen(PS_SOLID, 2, THEMED_RGB(255, 80, 80)); HGDIOBJ old_marker = SelectObject(dc, marker);
+                HPEN marker = CreatePen(PS_SOLID, 2, RGB(242, 188, 66)); HGDIOBJ old_marker = SelectObject(dc, marker);
                 MoveToEx(dc, x, 0, nullptr); LineTo(dc, x, client.bottom);
                 SelectObject(dc, old_marker); DeleteObject(marker);
-                HBRUSH tip = CreateSolidBrush(THEMED_RGB(255, 80, 80)); HGDIOBJ old_tip = SelectObject(dc, tip);
+                HBRUSH tip = CreateSolidBrush(RGB(242, 188, 66)); HGDIOBJ old_tip = SelectObject(dc, tip);
                 const POINT triangle[3] = {{x - 4, 0}, {x + 4, 0}, {x, 5}};
                 Polygon(dc, triangle, 3);
                 SelectObject(dc, old_tip); DeleteObject(tip);
@@ -1619,16 +1768,25 @@ void show_graph_context_menu(HWND graph, int client_x, int client_y) {
     std::wostringstream status; status << L"Selected instruction: 0x" << std::hex << std::uppercase << *address;
     SetWindowTextW(g_status, status.str().c_str());
     HMENU context = CreatePopupMenu();
-    AppendMenuW(context, MF_STRING, ID_EDIT_INSTRUCTION, L"Patch Instruction...");
+    AppendMenuW(context, MF_STRING, ID_FOLLOW_CURSOR_ENTER, L"Jump to Operand\tEnter");
+    AppendMenuW(context, MF_STRING, ID_LIST_XREFS, L"Jump to xref to operand...\tX");
+    AppendMenuW(context, MF_STRING, ID_XREFS_FROM, L"Jump to xref from...\tCtrl+J");
+    AppendMenuW(context, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(context, MF_STRING, ID_DECOMPILE, L"View Pseudocode\tF5");
+    AppendMenuW(context, MF_STRING, ID_TOGGLE_GRAPH_LIST, L"Text View\tSpace");
+    AppendMenuW(context, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(context, MF_STRING, ID_RENAME_LABEL, L"Rename...\tN");
+    AppendMenuW(context, MF_STRING, ID_ADD_COMMENT, L"Comments...\t;");
+    AppendMenuW(context, MF_STRING, ID_SET_PROTOTYPE, L"Set type...\tY");
+    AppendMenuW(context, MF_STRING, ID_STRUCT_OFFSET, L"Structure offset...\tT");
+    AppendMenuW(context, MF_STRING, ID_ENUM_OPERAND, L"Enum constant...\tM");
+    AppendMenuW(context, MF_STRING, ID_ASSIGN_TYPE, L"Assign Type...");
+    AppendMenuW(context, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(context, MF_STRING, ID_EDIT_INSTRUCTION, L"Patch Instruction...\tCtrl+E");
     AppendMenuW(context, MF_POPUP, reinterpret_cast<UINT_PTR>(build_patch_submenu()), L"Patch");
     AppendMenuW(context, MF_STRING, ID_NOP_BLOCK, L"Patch Function (NOP)");
-    AppendMenuW(context, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(context, MF_STRING, ID_TOGGLE_BP, L"Toggle Breakpoint");
-    AppendMenuW(context, MF_STRING, ID_DECOMPILE, L"View Pseudocode (F5)");
-    AppendMenuW(context, MF_STRING, ID_SIGMAKER, L"Generate Signature");
-    AppendMenuW(context, MF_STRING, ID_RENAME_LABEL, L"Rename Label");
-    AppendMenuW(context, MF_STRING, ID_ADD_COMMENT, L"Add Comment");
-    AppendMenuW(context, MF_STRING, ID_ASSIGN_TYPE, L"Assign Type...");
+    AppendMenuW(context, MF_STRING, ID_TOGGLE_BP, L"Toggle Breakpoint\tF2");
+    AppendMenuW(context, MF_STRING, ID_SIGMAKER, L"Generate Signature\tCtrl+B");
     AppendMenuW(context, MF_STRING, ID_HIDE_FUNCTION, L"Hide Function from Analysis");
     AppendMenuW(context, MF_SEPARATOR, 0, nullptr);
     {
@@ -1657,6 +1815,10 @@ void show_graph_context_menu(HWND graph, int client_x, int client_y) {
 
 LRESULT CALLBACK graph_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     if (message == WM_ERASEBKGND) return 1;
+    if (message == WM_KEYDOWN && wparam == VK_RETURN) {
+        follow_operand_at_cursor(GetParent(window));
+        return 0;
+    }
     if (message == WM_MOUSEWHEEL) {
         const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
         g_graph_zoom = (std::max)(25, (std::min)(180, g_graph_zoom + (delta > 0 ? 10 : -10)));
@@ -1724,6 +1886,7 @@ LRESULT CALLBACK graph_proc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         return 0;
     }
     if (message == WM_LBUTTONDOWN && g_database) {
+        SetFocus(window);
         const int x = static_cast<int>(static_cast<short>(LOWORD(lparam)));
         const int y = static_cast<int>(static_cast<short>(HIWORD(lparam)));
         // Ctrl+click tags a node for grouping instead of starting a drag.
@@ -1796,14 +1959,14 @@ LRESULT CALLBACK graph_proc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         HGDIOBJ graph_font = SelectObject(dc, g_code_font);
         if (!g_database) {
             SetTextColor(dc, THEMED_RGB(170, 239, 207));
-            TextOutW(dc, 24, 24, L"Gandon View-A", 13);
-            TextOutW(dc, 24, 52, L"Open a binary to build the control-flow graph.", 45);
+            TextOutW(dc, 24, 24, L"IDA View-A", 10);
+            TextOutW(dc, 24, 52, L"Open a binary (Ctrl+O) to build the control-flow graph.", 55);
         } else {
-            RECT header{12, 8, 500, 32};
+            RECT header{12, 8, 520, 32};
             HBRUSH header_brush = CreateSolidBrush(THEMED_RGB(18, 22, 27));
             FillRect(dc, &header, header_brush); DeleteObject(header_brush);
             std::wostringstream graph_header;
-            graph_header << L"CFG  0x" << std::hex << std::uppercase << g_current_address
+            graph_header << L"IDA View-A   0x" << std::hex << std::uppercase << g_current_address
                          << L"   |   blocks " << std::dec << g_graph_blocks.size()
                          << L"   |   zoom " << g_graph_zoom << L"%";
             SetTextColor(dc, THEMED_RGB(155, 190, 214));
@@ -1882,10 +2045,13 @@ LRESULT CALLBACK graph_proc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 }
                 title += L":";
                 const bool collapsed = g_collapsed_blocks.contains(block.start) || block.is_group;
+                RECT hdr_rect{x + 1, y + 1, x + width - 1, y + sx(27)};
+                HBRUSH hdr_fill = CreateSolidBrush(active_block ? THEMED_RGB(36, 57, 66) : THEMED_RGB(18, 29, 38));
+                FillRect(dc, &hdr_rect, hdr_fill); DeleteObject(hdr_fill);
                 // [-]/[+] toggle glyph at the right edge of the header.
                 const std::wstring glyph = collapsed ? L"[+]" : L"[-]";
-                SetTextColor(dc, THEMED_RGB(155, 170, 184)); TextOutW(dc, x + width - sx(34), y + sx(8), glyph.c_str(), 3);
-                SetTextColor(dc, block.is_group ? THEMED_RGB(206, 184, 247) : THEMED_RGB(170, 239, 207)); TextOutW(dc, x + sx(12), y + sx(8), title.c_str(), static_cast<int>(title.size()));
+                SetTextColor(dc, THEMED_RGB(155, 170, 184)); TextOutW(dc, x + width - sx(34), y + sx(6), glyph.c_str(), 3);
+                SetTextColor(dc, block.is_group ? THEMED_RGB(206, 184, 247) : THEMED_RGB(170, 239, 207)); TextOutW(dc, x + sx(12), y + sx(6), title.c_str(), static_cast<int>(title.size()));
                 HPEN separator = CreatePen(PS_SOLID, 1, THEMED_RGB(52, 64, 74));
                 HGDIOBJ old_separator = SelectObject(dc, separator);
                 MoveToEx(dc, x + 1, y + sx(27), nullptr); LineTo(dc, x + width - 1, y + sx(27));
@@ -1906,6 +2072,15 @@ LRESULT CALLBACK graph_proc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 }
                 for (std::size_t index = 0; index < block.instructions.size() && index < 40 && !collapsed; ++index) {
                     const auto& instruction = *block.instructions[index];
+                    if (instruction.address == g_current_address) {
+                        RECT line_hl{x + 2, line_y, x + width - 2, line_y + sx(18)};
+                        HBRUSH hl_brush = CreateSolidBrush(THEMED_RGB(0, 122, 204));
+                        RECT soft_hl = line_hl;
+                        HBRUSH soft = CreateSolidBrush(g_light_theme ? RGB(205, 228, 252) : RGB(44, 68, 102));
+                        FillRect(dc, &soft_hl, soft); DeleteObject(soft);
+                        RECT bar{x + 2, line_y, x + 5, line_y + sx(18)};
+                        FillRect(dc, &bar, hl_brush); DeleteObject(hl_brush);
+                    }
                     const auto& views = ida_views(*g_database);
                     const auto address = wide(views.address_text(instruction.address));
                     const auto formatted = wide(views.format_instruction(instruction));
@@ -2026,7 +2201,7 @@ int native_plugin_read_process_bytes(void*, std::uint64_t address, std::uint8_t*
 void native_plugin_navigate(void* user_data, std::uint64_t address) {
     const auto window = reinterpret_cast<HWND>(user_data);
     if (!window || !g_database) return;
-    navigate_to_address(window, address, 1);
+    navigate_to_address(window, address, is_graph_view_active() ? 0 : 1);
 }
 
 int native_plugin_register_action(void* user_data, const char*, const char* title,
@@ -2060,10 +2235,36 @@ bool invoke_native_plugin_action(HWND window, int menu_id) {
 // server, say) never touches g_database directly.
 // ---------------------------------------------------------------------------
 
+struct UiCall {
+    std::function<void()> job;
+    HANDLE event{};
+    ~UiCall() { if (event) CloseHandle(event); }
+};
+
 void run_on_ui_thread(const std::function<void()>& job) {
+    if (g_ui_shutting_down.load() || !job) return;
     if (!g_main_window || GetCurrentThreadId() == GetWindowThreadProcessId(g_main_window, nullptr)) { job(); return; }
-    auto copy = job; // SendMessageW blocks until the handler returns, so this local outlives the call
-    SendMessageW(g_main_window, WM_RUN_ON_UI, 0, reinterpret_cast<LPARAM>(&copy));
+    auto call = std::make_shared<UiCall>();
+    call->job = job;
+    call->event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!call->event) return;
+    auto* holder = new std::shared_ptr<UiCall>(call);
+    if (!PostMessageW(g_main_window, WM_RUN_ON_UI, 1, reinterpret_cast<LPARAM>(holder))) {
+        delete holder;
+        return;
+    }
+    while (!g_ui_shutting_down.load()) {
+        if (WaitForSingleObject(call->event, 50) == WAIT_OBJECT_0) break;
+    }
+}
+
+void post_on_ui_thread(std::function<void()> job) {
+    if (g_ui_shutting_down.load() || !g_main_window || !job) return;
+    if (GetCurrentThreadId() == GetWindowThreadProcessId(g_main_window, nullptr)) { job(); return; }
+    auto call = std::make_shared<UiCall>();
+    call->job = std::move(job);
+    auto* holder = new std::shared_ptr<UiCall>(call);
+    if (!PostMessageW(g_main_window, WM_RUN_ON_UI, 1, reinterpret_cast<LPARAM>(holder))) delete holder;
 }
 
 // strtok-style: the returned pointer is only valid until the next call to
@@ -2407,6 +2608,412 @@ void output_log(const std::wstring& line) {
     const std::wstring text = line + L"\r\n";
     SendMessageW(g_output, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(text.c_str()));
     SendMessageW(g_output, EM_SCROLLCARET, 0, 0);
+}
+
+void update_status_bar_panes() {
+    if (!g_status) return;
+    const std::wstring mcp_text = g_mcp_server.is_running()
+        ? (L"MCP: :" + std::to_wstring(g_mcp_server.config().port))
+        : L"MCP: off";
+    SendMessageW(g_status, SB_SETTEXTW, 1, reinterpret_cast<LPARAM>(L"AU: idle"));
+    SendMessageW(g_status, SB_SETTEXTW, 2, reinterpret_cast<LPARAM>(mcp_text.c_str()));
+    SendMessageW(g_status, SB_SETTEXTW, 3, reinterpret_cast<LPARAM>(L"Down"));
+}
+
+void copy_text_to_clipboard(HWND owner, const std::wstring& text) {
+    if (!OpenClipboard(owner)) return;
+    EmptyClipboard();
+    const std::size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    if (HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, bytes)) {
+        if (void* ptr = GlobalLock(mem)) {
+            std::memcpy(ptr, text.c_str(), bytes);
+            GlobalUnlock(mem);
+            SetClipboardData(CF_UNICODETEXT, mem);
+        } else {
+            GlobalFree(mem);
+        }
+    }
+    CloseClipboard();
+}
+
+gandon::McpHostCallbacks mcp_build_callbacks() {
+    auto esc_json = [](const std::string& s) {
+        std::string out;
+        out.reserve(s.size() + 8);
+        for (unsigned char c : s) {
+            switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20) { char b[8]; std::snprintf(b, sizeof(b), "\\u%04x", c); out += b; }
+                else out.push_back(static_cast<char>(c));
+            }
+        }
+        return out;
+    };
+    gandon::McpHostCallbacks cb;
+    cb.log = [](const std::string& msg) {
+        post_on_ui_thread([m = wide(msg)] { output_log(m); });
+    };
+    cb.status = [](const std::string& msg) {
+        post_on_ui_thread([m = wide(msg)] {
+            if (g_status) SetWindowTextW(g_status, m.c_str());
+            update_status_bar_panes();
+        });
+    };
+    cb.current_address = []() -> std::uint64_t {
+        std::uint64_t addr = 0;
+        run_on_ui_thread([&] { addr = g_current_address; });
+        return addr;
+    };
+    cb.info_json = [esc_json]() -> std::optional<std::string> {
+        std::optional<std::string> res;
+        run_on_ui_thread([&] {
+            if (!g_database) return;
+            const auto& image = g_database->image();
+            std::ostringstream out;
+            out << "{\"path\":\"" << esc_json(image.path.generic_string())
+                << "\",\"format\":\"" << (image.format == gandon::BinaryFormat::PE ? "PE" : image.format == gandon::BinaryFormat::ELF ? "ELF" : "unknown")
+                << "\",\"architecture\":\"" << (image.architecture == gandon::MachineArchitecture::X64 ? "x64" : image.architecture == gandon::MachineArchitecture::X86 ? "x86" : image.architecture == gandon::MachineArchitecture::ARM64 ? "arm64" : "unknown")
+                << "\",\"is_64_bit\":" << (image.is_64_bit ? "true" : "false")
+                << ",\"image_base\":\"0x" << std::hex << image.image_base
+                << "\",\"entry_point\":\"0x" << image.entry_point << std::dec
+                << "\",\"size\":" << image.bytes.size()
+                << ",\"function_count\":" << g_database->functions().size()
+                << ",\"xref_count\":" << g_database->xrefs().size() << "}";
+            res = out.str();
+        });
+        return res;
+    };
+    cb.resolve_address = [](const std::string& text) -> std::optional<std::uint64_t> {
+        std::optional<std::uint64_t> res;
+        run_on_ui_thread([&] {
+            if (g_database) res = resolve_jump_target(wide(text));
+        });
+        return res;
+    };
+    cb.list_functions = []() -> std::vector<gandon::McpFunctionInfo> {
+        std::vector<gandon::McpFunctionInfo> out;
+        run_on_ui_thread([&] {
+            if (!g_database) return;
+            out.reserve(g_database->functions().size());
+            for (const auto& fn : g_database->functions()) {
+                const auto it = g_custom_labels.find(fn.start);
+                out.push_back({fn.start, it != g_custom_labels.end() ? utf8_from_wide(it->second) : fn.name});
+            }
+        });
+        return out;
+    };
+    cb.disasm_at = [](std::uint64_t address, std::size_t count) -> std::vector<gandon::McpInstructionInfo> {
+        std::vector<gandon::McpInstructionInfo> out;
+        run_on_ui_thread([&] {
+            if (!g_database || !address) return;
+            if (const auto fn = g_database->function_at(address)) {
+                for (const auto& insn : fn->get().instructions) {
+                    if (insn.address < address) continue;
+                    out.push_back({insn.address, insn.size, insn.mnemonic, insn.operands});
+                    if (out.size() >= count) return;
+                }
+            }
+            if (out.empty()) {
+                const auto decoded = gandon::decode_x64(g_database->image(), address, count);
+                for (const auto& insn : decoded) {
+                    out.push_back({insn.address, insn.size, insn.mnemonic, insn.operands});
+                    if (out.size() >= count) break;
+                }
+            }
+        });
+        return out;
+    };
+    cb.listing_at = [](std::uint64_t address) -> std::optional<std::string> {
+        std::optional<std::string> res;
+        run_on_ui_thread([&] {
+            if (g_database && address) res = utf8_from_wide(listing_text_at(*g_database, address));
+        });
+        return res;
+    };
+    cb.decompile_at = [](std::uint64_t address, bool address_comments) -> gandon::McpDecompileResult {
+        gandon::McpDecompileResult res;
+        run_on_ui_thread([&] {
+            if (!g_database || !address) return;
+            res.has_binary = true;
+            const auto d = gandon::decompile_function_at(*g_database, address, address_comments, [](std::uint64_t a) -> std::string {
+                const auto it = g_custom_labels.find(a);
+                return it == g_custom_labels.end() ? std::string{} : utf8_from_wide(it->second);
+            }, &g_noreturn);
+            res.ok = d.ok;
+            res.text = d.ok ? d.text : d.error;
+        });
+        return res;
+    };
+    cb.xrefs_at = [](std::uint64_t address, const std::string& direction) -> std::vector<gandon::McpXrefInfo> {
+        std::vector<gandon::McpXrefInfo> out;
+        run_on_ui_thread([&] {
+            if (!g_database || !address) return;
+            const auto& views = ida_views(*g_database);
+            const bool want_to = (direction == "to" || direction == "both");
+            const bool want_from = (direction == "from" || direction == "both");
+            for (const auto& x : g_database->xrefs()) {
+                if ((want_to && x.to == address) || (want_from && x.from == address)) {
+                    out.push_back({x.from, x.to, x.kind, views.symbolic(x.from), views.symbolic(x.to)});
+                    if (out.size() >= 2000) break;
+                }
+            }
+        });
+        return out;
+    };
+    cb.strings_text = [](std::size_t min_length) -> std::optional<std::string> {
+        std::optional<std::string> res;
+        run_on_ui_thread([&] {
+            if (g_database) res = ida_views(*g_database).strings(min_length);
+        });
+        return res;
+    };
+    cb.imports_text = []() -> std::optional<std::string> {
+        std::optional<std::string> res;
+        run_on_ui_thread([&] { if (g_database) res = utf8_from_wide(imports_text(g_database->image())); });
+        return res;
+    };
+    cb.exports_text = []() -> std::optional<std::string> {
+        std::optional<std::string> res;
+        run_on_ui_thread([&] { if (g_database) res = utf8_from_wide(exports_text(g_database->image())); });
+        return res;
+    };
+    cb.resources_text = []() -> std::optional<std::string> {
+        std::optional<std::string> res;
+        run_on_ui_thread([&] { if (g_database) res = utf8_from_wide(resources_text(g_database->image())); });
+        return res;
+    };
+    cb.segments_text = []() -> std::optional<std::string> {
+        std::optional<std::string> res;
+        run_on_ui_thread([&] { if (g_database) res = utf8_from_wide(memory_map_text(*g_database)); });
+        return res;
+    };
+    cb.hex_dump_at = [](std::uint64_t address, std::size_t rows) -> std::optional<std::string> {
+        std::optional<std::string> res;
+        run_on_ui_thread([&] {
+            if (g_database && address) res = ida_views(*g_database).hex_view(address, rows);
+        });
+        return res;
+    };
+    cb.search_bytes = [](const std::string& pattern_text) -> std::optional<std::vector<std::uint64_t>> {
+        std::optional<std::vector<std::uint64_t>> res;
+        run_on_ui_thread([&] {
+            if (!g_database) return;
+            std::vector<std::optional<std::uint8_t>> pattern;
+            std::istringstream tokens(pattern_text);
+            std::string token;
+            while (tokens >> token) {
+                if (token == "??" || token == "?") { pattern.push_back(std::nullopt); continue; }
+                try { pattern.push_back(static_cast<std::uint8_t>(std::stoul(token, nullptr, 16))); } catch (...) { return; }
+            }
+            if (!pattern.empty()) res = g_database->image().find_pattern(pattern, 500);
+        });
+        return res;
+    };
+    cb.search_text = [](const std::string& text) -> std::optional<std::vector<std::uint64_t>> {
+        std::optional<std::vector<std::uint64_t>> res;
+        run_on_ui_thread([&] {
+            if (!g_database || text.empty()) return;
+            const std::vector<std::uint8_t> pat(text.begin(), text.end());
+            auto matches = g_database->image().find_bytes(pat);
+            if (matches.size() > 500) matches.resize(500);
+            res = std::move(matches);
+        });
+        return res;
+    };
+    cb.run_auto_analysis = []() -> std::optional<std::string> {
+        std::optional<std::string> res;
+        run_on_ui_thread([&] {
+            if (!g_database) return;
+            gui_auto_analysis(*g_database);
+            fill_tree();
+            refresh_views(g_main_window);
+            g_session_dirty = true;
+            res = utf8_from_wide(g_auto_analysis_summary);
+        });
+        return res;
+    };
+    cb.rename = [](std::uint64_t address, const std::string& new_name) -> bool {
+        bool ok = false;
+        run_on_ui_thread([&] {
+            if (!g_database || !address || new_name.empty()) return;
+            record_text_edit(false, address, wide(new_name));
+            g_custom_labels[address] = wide(new_name);
+            g_session_dirty = true;
+            refresh_views(g_main_window);
+            ok = true;
+        });
+        return ok;
+    };
+    cb.add_comment = [](std::uint64_t address, const std::string& comment_utf8) -> bool {
+        bool ok = false;
+        run_on_ui_thread([&] {
+            if (!g_database || !address) return;
+            record_text_edit(true, address, wide(comment_utf8));
+            g_custom_comments[address] = wide(comment_utf8);
+            g_session_dirty = true;
+            refresh_views(g_main_window);
+            ok = true;
+        });
+        return ok;
+    };
+    cb.patch_bytes = [](std::uint64_t address, const std::vector<std::uint8_t>& bytes) -> bool {
+        bool ok = false;
+        run_on_ui_thread([&] {
+            if (!g_database || !address || bytes.empty()) return;
+            const auto offset = g_database->image().va_to_file_offset(address);
+            if (!offset) return;
+            std::vector<std::uint8_t> original;
+            std::string err;
+            if (!g_database->patch_bytes(address, bytes, original, err)) return;
+            std::vector<PatchChange> changes;
+            for (std::size_t i = 0; i < bytes.size(); ++i)
+                if (bytes[i] != original[i]) changes.push_back({*offset + i, original[i], bytes[i]});
+            if (!changes.empty()) {
+                g_patch_undo.push_back(std::move(changes));
+                g_patch_redo.clear();
+                g_timeline.push_back('p');
+                g_timeline_redo.clear();
+            }
+            refresh_after_patch(g_main_window);
+            ok = true;
+        });
+        return ok;
+    };
+    cb.navigate = [](std::uint64_t address) -> bool {
+        bool ok = false;
+        run_on_ui_thread([&] {
+            if (!g_main_window || !g_database || !address) return;
+            navigate_to_address(g_main_window, address, is_graph_view_active() ? 0 : 1);
+            ok = true;
+        });
+        return ok;
+    };
+    cb.save_database = [](const std::string& path, std::string& err) -> bool {
+        bool ok = false;
+        run_on_ui_thread([&] {
+            if (!g_database) { err = "no binary open"; return; }
+            if (!write_database_file(std::filesystem::path(wide(path)), err)) return;
+            g_session_path = wide(path);
+            g_session_dirty = false;
+            ok = true;
+        });
+        return ok;
+    };
+    cb.load_database = [](const std::string& path, std::string& err) -> bool {
+        bool ok = false;
+        run_on_ui_thread([&] {
+            ok = load_database_core(g_main_window, std::filesystem::path(wide(path)), false, err);
+        });
+        return ok;
+    };
+    return cb;
+}
+
+void mcp_start_server(HWND window) {
+    g_mcp_config = gandon::McpServerConfig{};
+    char env_buf[512]{};
+    if (GetEnvironmentVariableA("GANDON_MCP_HOST", env_buf, sizeof(env_buf)) > 0) g_mcp_config.host = env_buf;
+    if (GetEnvironmentVariableA("GANDON_MCP_PORT", env_buf, sizeof(env_buf)) > 0) {
+        const int p = std::atoi(env_buf);
+        if (p > 0 && p <= 65535) g_mcp_config.port = p;
+    }
+    if (GetEnvironmentVariableA("GANDON_MCP_TOKEN", env_buf, sizeof(env_buf)) > 0) g_mcp_config.token = env_buf;
+
+    g_mcp_server.set_callbacks(mcp_build_callbacks());
+    std::string error;
+    if (!g_mcp_server.start(g_mcp_config, error)) {
+        output_log(L"[mcp] Built-in MCP failed to start: " + wide(error));
+        if (g_status) SetWindowTextW(g_status, (L"MCP error: " + wide(error)).c_str());
+    }
+    if (window) CheckMenuItem(GetMenu(window), ID_MCP_TOGGLE, MF_BYCOMMAND | (g_mcp_server.is_running() ? MF_CHECKED : MF_UNCHECKED));
+    update_status_bar_panes();
+}
+
+void mcp_toggle_server(HWND window) {
+    if (g_mcp_server.is_running()) {
+        g_mcp_server.stop();
+        output_log(L"[mcp] Built-in MCP server stopped.");
+        if (g_status) SetWindowTextW(g_status, L"Built-in MCP server stopped.");
+    } else {
+        g_mcp_server.set_callbacks(mcp_build_callbacks());
+        std::string error;
+        if (!g_mcp_server.start(g_mcp_config, error)) {
+            MessageBoxW(window, wide(error).c_str(), L"Built-in MCP Server", MB_ICONERROR);
+        }
+    }
+    if (window) CheckMenuItem(GetMenu(window), ID_MCP_TOGGLE, MF_BYCOMMAND | (g_mcp_server.is_running() ? MF_CHECKED : MF_UNCHECKED));
+    update_status_bar_panes();
+}
+
+void mcp_configure_dialog(HWND window) {
+    const auto port_text = prompt_text(window, L"Built-in MCP Server", L"TCP Port (1..65535):", std::to_wstring(g_mcp_config.port), L"Default: 8766 (http://127.0.0.1:8766/mcp)");
+    if (!port_text || port_text->empty()) return;
+    int port = 0;
+    try { port = std::stoi(*port_text); } catch (...) { port = 0; }
+    if (port <= 0 || port > 65535) {
+        MessageBoxW(window, L"Invalid TCP port number (1..65535).", L"Built-in MCP Server", MB_ICONWARNING);
+        return;
+    }
+    const auto host_text = prompt_text(window, L"Built-in MCP Server", L"Bind host (127.0.0.1 for local, 0.0.0.0 for LAN):", wide(g_mcp_config.host));
+    if (!host_text || host_text->empty()) return;
+    const auto token_text = prompt_text(window, L"Built-in MCP Server", L"Bearer token (empty = no auth required):", wide(g_mcp_config.token));
+    if (!token_text) return;
+
+    g_mcp_config.port = port;
+    g_mcp_config.host = utf8(*host_text);
+    g_mcp_config.token = utf8(*token_text);
+
+    g_mcp_server.set_callbacks(mcp_build_callbacks());
+    std::string error;
+    if (!g_mcp_server.start(g_mcp_config, error)) {
+        MessageBoxW(window, wide(error).c_str(), L"Built-in MCP Server", MB_ICONERROR);
+    } else {
+        SetWindowTextW(g_status, (L"MCP restarted on " + wide(g_mcp_server.endpoint_url())).c_str());
+    }
+    if (window) CheckMenuItem(GetMenu(window), ID_MCP_TOGGLE, MF_BYCOMMAND | (g_mcp_server.is_running() ? MF_CHECKED : MF_UNCHECKED));
+    update_status_bar_panes();
+}
+
+void mcp_copy_url(HWND window) {
+    const auto url = wide(g_mcp_server.endpoint_url());
+    copy_text_to_clipboard(window, url);
+    SetWindowTextW(g_status, (L"Copied MCP URL: " + url).c_str());
+}
+
+void mcp_copy_client_config(HWND window) {
+    std::wostringstream out;
+    out << L"{\r\n"
+        << L"  \"mcpServers\": {\r\n"
+        << L"    \"gandon-pro\": {\r\n"
+        << L"      \"type\": \"http\",\r\n"
+        << L"      \"url\": \"" << wide(g_mcp_server.endpoint_url()) << L"\"";
+    if (!g_mcp_config.token.empty()) {
+        out << L",\r\n      \"headers\": {\r\n"
+            << L"        \"Authorization\": \"Bearer " << wide(g_mcp_config.token) << L"\"\r\n"
+            << L"      }";
+    }
+    out << L"\r\n    }\r\n"
+        << L"  }\r\n"
+        << L"}";
+    copy_text_to_clipboard(window, out.str());
+    SetWindowTextW(g_status, L"Copied MCP client JSON configuration to clipboard.");
+}
+
+void mcp_show_status(HWND window) {
+    std::wostringstream msg;
+    msg << L"Built-in MCP Server (in-process, no plugin required)\r\n\r\n"
+        << L"Status: " << (g_mcp_server.is_running() ? L"Running" : L"Stopped") << L"\r\n"
+        << L"Endpoint: " << wide(g_mcp_server.endpoint_url()) << L"\r\n"
+        << L"Health check: http://" << wide(g_mcp_config.host) << L":" << g_mcp_config.port << L"/health\r\n"
+        << L"Auth: " << (g_mcp_config.token.empty() ? L"None (localhost)" : L"Bearer token enabled") << L"\r\n"
+        << L"Requests served: " << g_mcp_server.requests_served() << L"\r\n"
+        << L"Binary open: " << (g_database ? g_database->image().path.filename().wstring() : L"(none)");
+    MessageBoxW(window, msg.str().c_str(), L"Built-in MCP Server", MB_ICONINFORMATION);
 }
 
 void gui_auto_analysis(gandon::AnalysisDatabase& db) {
@@ -2910,7 +3517,7 @@ void navigate_to_address(HWND window, std::uint64_t address, int tab) {
     if (!g_database || !address) return;
     // Selecting a node/instruction that is already on screen in View-A must not
     // rebuild the graph (that reset the scroll position to the graph start).
-    if (tab == 0 && g_tabs && TabCtrl_GetCurSel(g_tabs) == 0 && graph_shows_address(address)) {
+    if (tab == 0 && g_tabs && is_graph_view_active() && graph_shows_address(address)) {
         g_current_address = address;
         g_session_dirty = true;
         if (g_navband) InvalidateRect(g_navband, nullptr, FALSE);
@@ -2919,7 +3526,7 @@ void navigate_to_address(HWND window, std::uint64_t address, int tab) {
         return;
     }
     if (g_current_address && g_current_address != address) {
-        g_navigation_history.push_back({g_current_address, g_tabs ? TabCtrl_GetCurSel(g_tabs) : 1});
+        g_navigation_history.push_back({g_current_address, g_tabs ? active_legacy_tab() : 1});
         if (g_navigation_history.size() > 256) g_navigation_history.erase(g_navigation_history.begin());
         g_navigation_forward.clear();   // a fresh jump invalidates the forward trail
     }
@@ -2929,11 +3536,25 @@ void navigate_to_address(HWND window, std::uint64_t address, int tab) {
     if (tab == 2) g_pseudocode = pseudocode_text_at(*g_database, address);
     else if (tab == 1) g_listing = listing_text_at(*g_database, address);
     select_view(window, tab);
+    if (g_status) {
+        const auto sym = wide(ida_views(*g_database).symbolic(address));
+        wchar_t buf[256]{};
+        if (!sym.empty()) swprintf_s(buf, L"0x%llX  (%s)", static_cast<unsigned long long>(address), sym.c_str());
+        else swprintf_s(buf, L"0x%llX", static_cast<unsigned long long>(address));
+        SetWindowTextW(g_status, buf);
+    }
 }
 
 void toggle_graph_listing(HWND window) {
-    const auto tab = TabCtrl_GetCurSel(g_tabs);
-    select_view(window, tab == 0 ? 1 : 0);
+    if (active_view_kind() != ViewKind::ViewA) {
+        select_view(window, g_view_a_graph_mode ? 0 : 1);
+        return;
+    }
+    g_view_a_graph_mode = !g_view_a_graph_mode;
+    if (!g_view_a_graph_mode && g_database) {
+        g_listing = listing_text_at(*g_database, g_current_address ? g_current_address : g_database->image().entry_point);
+    }
+    select_view(window, g_view_a_graph_mode ? 0 : 1);
 }
 
 void fit_graph(HWND window) {
@@ -2961,7 +3582,7 @@ void fit_graph(HWND window) {
 
 void toggle_minimap(HWND window) {
     g_minimap_visible = !g_minimap_visible;
-    if (g_minimap) ShowWindow(g_minimap, g_minimap_visible && TabCtrl_GetCurSel(g_tabs) == 0 ? SW_SHOW : SW_HIDE);
+    if (g_minimap) ShowWindow(g_minimap, g_minimap_visible && is_graph_view_active() ? SW_SHOW : SW_HIDE);
     CheckMenuItem(GetMenu(window), ID_TOGGLE_MINIMAP, MF_BYCOMMAND | (g_minimap_visible ? MF_CHECKED : MF_UNCHECKED));
     SendMessageW(window, WM_SIZE, 0, 0);
     InvalidateRect(g_view, nullptr, FALSE);
@@ -3105,7 +3726,7 @@ void jump_back(HWND window) {
     }
     const auto point = g_navigation_history.back();
     g_navigation_history.pop_back();
-    if (g_current_address) g_navigation_forward.push_back({g_current_address, g_tabs ? TabCtrl_GetCurSel(g_tabs) : 1});
+    if (g_current_address) g_navigation_forward.push_back({g_current_address, g_tabs ? active_legacy_tab() : 1});
     jump_to_point(window, point);
 }
 
@@ -3116,7 +3737,7 @@ void jump_forward(HWND window) {
     }
     const auto point = g_navigation_forward.back();
     g_navigation_forward.pop_back();
-    if (g_current_address) g_navigation_history.push_back({g_current_address, g_tabs ? TabCtrl_GetCurSel(g_tabs) : 1});
+    if (g_current_address) g_navigation_history.push_back({g_current_address, g_tabs ? active_legacy_tab() : 1});
     jump_to_point(window, point);
 }
 
@@ -3135,7 +3756,7 @@ void next_bookmark(HWND window) {
     }
     auto it = g_bookmarks.upper_bound(g_current_address);
     if (it == g_bookmarks.end()) it = g_bookmarks.begin();
-    navigate_to_address(window, *it, 1);
+    navigate_to_address(window, *it, is_graph_view_active() ? 0 : 1);
 }
 
 std::string json_escape(const std::string& value) {
@@ -3328,7 +3949,7 @@ std::optional<std::uint64_t> editor_line_address(HWND editor) {
 }
 
 void sync_current_address_from_editor() {
-    if (!g_database || !g_editor || !g_tabs || TabCtrl_GetCurSel(g_tabs) == 0) return;
+    if (!g_database || !g_editor || !g_tabs || is_graph_view_active()) return;
     if (const auto address = editor_line_address(g_editor)) {
         g_current_address = *address;
         g_session_dirty = true;
@@ -3507,40 +4128,151 @@ void reset_editor_text_color() {
     SendMessageW(g_editor, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&format));
 }
 
+std::wstring view_kind_title(ViewKind kind) {
+    switch (kind) {
+    case ViewKind::ViewA: return L"IDA View-A";
+    case ViewKind::Pseudocode: return L"Pseudocode-A";
+    case ViewKind::Hex: return L"Hex View-1";
+    case ViewKind::Imports: return L"Imports";
+    case ViewKind::Exports: return L"Exports";
+    case ViewKind::Strings: return L"Strings";
+    case ViewKind::LocalTypes: return L"Local Types";
+    case ViewKind::Resources: return L"Resources";
+    case ViewKind::Symbols: return L"Names";
+    case ViewKind::MemoryMap: return L"Segments";
+    case ViewKind::Problems: return L"Problems";
+    case ViewKind::Debugger: return L"Debugger";
+    case ViewKind::Llil: return L"LLIL View";
+    }
+    return L"View";
+}
+
+ViewKind active_view_kind() {
+    if (!g_tabs || g_open_tabs.empty()) return ViewKind::ViewA;
+    const int sel = TabCtrl_GetCurSel(g_tabs);
+    if (sel >= 0 && sel < static_cast<int>(g_open_tabs.size())) return g_open_tabs[static_cast<std::size_t>(sel)];
+    return g_open_tabs.front();
+}
+
+int legacy_tab_for_kind(ViewKind kind) {
+    switch (kind) {
+    case ViewKind::ViewA: return g_view_a_graph_mode ? 0 : 1;
+    case ViewKind::Pseudocode: return 2;
+    case ViewKind::Debugger: return 4;
+    case ViewKind::Hex: return 5;
+    case ViewKind::LocalTypes: return 6;
+    case ViewKind::Imports: return 7;
+    case ViewKind::Exports: return 8;
+    case ViewKind::Strings: return 9;
+    case ViewKind::Resources: return 10;
+    case ViewKind::Symbols: return 11;
+    case ViewKind::MemoryMap: return 12;
+    case ViewKind::Problems: return 13;
+    case ViewKind::Llil: return 14;
+    }
+    return 1;
+}
+
+int active_legacy_tab() {
+    return legacy_tab_for_kind(active_view_kind());
+}
+
+bool is_graph_view_active() {
+    return active_view_kind() == ViewKind::ViewA && g_view_a_graph_mode;
+}
+
+void rebuild_tab_strip() {
+    if (!g_tabs) return;
+    const ViewKind keep = active_view_kind();
+    TabCtrl_DeleteAllItems(g_tabs);
+    for (std::size_t i = 0; i < g_open_tabs.size(); ++i) {
+        std::wstring label = view_kind_title(g_open_tabs[i]);
+        if (i > 0) label += L"    "; // extra space for close button
+        TCITEMW item{TCIF_TEXT, 0, 0, label.data(), 0, 0, 0};
+        TabCtrl_InsertItem(g_tabs, static_cast<int>(i), &item);
+    }
+    int sel = 0;
+    for (std::size_t i = 0; i < g_open_tabs.size(); ++i) {
+        if (g_open_tabs[i] == keep) { sel = static_cast<int>(i); break; }
+    }
+    TabCtrl_SetCurSel(g_tabs, sel);
+    InvalidateRect(g_tabs, nullptr, TRUE);
+}
+
+void open_or_focus_view(HWND window, ViewKind kind) {
+    int idx = -1;
+    for (std::size_t i = 0; i < g_open_tabs.size(); ++i) {
+        if (g_open_tabs[i] == kind) { idx = static_cast<int>(i); break; }
+    }
+    if (idx < 0) {
+        g_open_tabs.push_back(kind);
+        idx = static_cast<int>(g_open_tabs.size()) - 1;
+        if (g_tabs) {
+            std::wstring label = view_kind_title(kind) + (idx > 0 ? L"    " : L"");
+            TCITEMW item{TCIF_TEXT, 0, 0, label.data(), 0, 0, 0};
+            TabCtrl_InsertItem(g_tabs, idx, &item);
+        }
+    }
+    if (g_tabs) TabCtrl_SetCurSel(g_tabs, idx);
+    if (kind == ViewKind::ViewA && g_view_a_graph_mode) rebuild_graph_model();
+    set_editor_text();
+    update_graph_scrollbars(g_view);
+    invalidate_minimap();
+    if (window) InvalidateRect(window, nullptr, TRUE);
+}
+
+void close_tab(HWND window, int index) {
+    if (index <= 0 || index >= static_cast<int>(g_open_tabs.size())) return; // IDA View-A is pinned
+    const int cur = g_tabs ? TabCtrl_GetCurSel(g_tabs) : 0;
+    g_open_tabs.erase(g_open_tabs.begin() + index);
+    g_hover_close_tab = -1;
+    rebuild_tab_strip();
+    if (g_tabs) {
+        int next = cur;
+        if (cur == index) next = (std::min)(index - 1, static_cast<int>(g_open_tabs.size()) - 1);
+        else if (cur > index) next = cur - 1;
+        TabCtrl_SetCurSel(g_tabs, (std::max)(0, next));
+    }
+    g_session_tab = active_legacy_tab();
+    if (is_graph_view_active()) rebuild_graph_model();
+    set_editor_text();
+    update_graph_scrollbars(g_view);
+    invalidate_minimap();
+    if (window) InvalidateRect(window, nullptr, TRUE);
+}
+
 void set_editor_text() {
     if (!g_editor) return;
-    const int tab = TabCtrl_GetCurSel(g_tabs);
-    const bool graph = tab == 0;
+    const ViewKind vk = active_view_kind();
+    const int tab = legacy_tab_for_kind(vk);
+    const bool graph = (vk == ViewKind::ViewA && g_view_a_graph_mode);
     if (graph) {
         SetWindowPos(g_editor, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW);
         SetWindowPos(g_view, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         if (g_minimap) ShowWindow(g_minimap, g_minimap_visible ? SW_SHOW : SW_HIDE);
-        // The editor used to cover this area; repaint the parent and the canvas fully.
         if (HWND parent = GetParent(g_view)) { RECT area{}; GetWindowRect(g_view, &area); MapWindowPoints(nullptr, parent, reinterpret_cast<POINT*>(&area), 2); RedrawWindow(parent, &area, nullptr, RDW_INVALIDATE | RDW_ERASE); }
         RedrawWindow(g_view, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
-    } else {
-        SetWindowPos(g_view, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW);
-        if (g_minimap) ShowWindow(g_minimap, SW_HIDE);
-        SetWindowPos(g_editor, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+        InvalidateRect(g_view, nullptr, TRUE);
+        UpdateWindow(g_view);
+        return;
     }
+    SetWindowPos(g_view, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW);
+    if (g_minimap) ShowWindow(g_minimap, SW_HIDE);
+    SetWindowPos(g_editor, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
     std::wstring text;
     const std::wstring* shared_text = nullptr;
     if (!g_database) shared_text = &g_listing;
-    else if (tab == 1) {
+    else if (vk == ViewKind::ViewA) {
         if (g_listing.empty()) g_listing = listing_text(*g_database);
         shared_text = &g_listing;
     }
-    else if (tab == 2) {
+    else if (vk == ViewKind::Pseudocode) {
         g_pseudocode = pseudocode_text_at(*g_database, g_current_address ? g_current_address : g_database->image().entry_point);
         shared_text = &g_pseudocode;
     }
-    else if (tab == 3) {
-        if (g_xrefs.empty()) g_xrefs = xref_text(*g_database);
-        shared_text = &g_xrefs;
-    }
-    else if (tab == 4) text = debugger_text();
-    else if (tab == 5) text = hex_text(g_database->image(), g_current_address ? g_current_address : g_database->image().entry_point);
-    else if (tab == 6) {
+    else if (vk == ViewKind::Debugger) text = debugger_text();
+    else if (vk == ViewKind::Hex) text = hex_text(g_database->image(), g_current_address ? g_current_address : g_database->image().entry_point);
+    else if (vk == ViewKind::LocalTypes) {
         ensure_types(g_database->image().is_64_bit);
         text = L"Local Types  (Shift+F1 to edit your own declarations)\r\n===========\r\n";
         if (!g_type_error.empty()) text += L"!! your declarations: " + wide(g_type_error) + L"\r\n\r\n";
@@ -3560,19 +4292,18 @@ void set_editor_text() {
         }
         text += L"\r\nSelect an instruction or function and use Edit -> Assign Type... to change it.\r\n";
     }
-    else if (tab == 7) text = imports_text(g_database->image());
-    else if (tab == 8) text = exports_text(g_database->image());
-    else if (tab == 9) text = strings_text(g_database->image());
-    else if (tab == 10) text = resources_text(g_database->image());
-    else if (tab == 11) text = symbols_text(*g_database);
-    else if (tab == 12) text = memory_map_text(*g_database);
-    else if (tab == 13) text = problems_text(*g_database);
-    else if (tab == 14) text = low_level_il_text();
+    else if (vk == ViewKind::Imports) text = imports_text(g_database->image());
+    else if (vk == ViewKind::Exports) text = exports_text(g_database->image());
+    else if (vk == ViewKind::Strings) text = strings_text(g_database->image());
+    else if (vk == ViewKind::Resources) text = resources_text(g_database->image());
+    else if (vk == ViewKind::Symbols) text = symbols_text(*g_database);
+    else if (vk == ViewKind::MemoryMap) text = memory_map_text(*g_database);
+    else if (vk == ViewKind::Problems) text = problems_text(*g_database);
+    else if (vk == ViewKind::Llil) text = low_level_il_text();
     else shared_text = &g_listing;
     SetWindowTextW(g_editor, shared_text ? shared_text->c_str() : text.c_str());
     reset_editor_text_color();
     if (tab != 0 && tab != 4 && tab != 14 && tab != 6) colorize_editor(tab);
-    if (graph) { InvalidateRect(g_view, nullptr, TRUE); UpdateWindow(g_view); }
 }
 
 void fill_tree() {
@@ -3900,7 +4631,7 @@ bool write_database_file(const std::filesystem::path& file, std::string& error) 
     std::wofstream output(file, std::ios::trunc);
     if (!output) { error = "Could not create database: " + file.string(); return false; }
     output << L"GANDON-GND-3\n" << g_database->image().path.wstring() << L"\n";
-    const auto tab = g_tabs ? TabCtrl_GetCurSel(g_tabs) : g_session_tab;
+    const auto tab = g_tabs ? active_legacy_tab() : g_session_tab;
     const auto address = g_current_address ? g_current_address : g_session_address;
     output << L"P|" << address << L"|" << tab << L"\n";
     for (const auto& [address, label] : g_custom_labels) output << L"L|" << address << L"|" << label << L"\n";
@@ -4459,11 +5190,12 @@ void colorize_editor(int tab) {
     std::wstring text(static_cast<std::size_t>(length) + 1, L'\0');
     GetWindowTextW(g_editor, text.data(), length + 1);
     text.resize(static_cast<std::size_t>(length));
-    // Rich edit stores line breaks as a single character; GetWindowText returns CRLF.
-    const COLORREF addr_color = THEMED_RGB(125, 138, 150), comment_color = THEMED_RGB(106, 170, 110), mnemonic_color = THEMED_RGB(86, 156, 214),
-                   flow_color = THEMED_RGB(229, 160, 80), label_color = THEMED_RGB(230, 219, 140), number_color = THEMED_RGB(181, 206, 168),
-                   string_color = THEMED_RGB(206, 145, 120), head_color = THEMED_RGB(150, 190, 235);
-    // WM_SETREDRAW(TRUE) re-applies WS_VISIBLE, which resurrected the hidden editor on top of View-A.
+    const COLORREF addr_color = THEMED_RGB(125, 138, 150), comment_color = THEMED_RGB(106, 170, 110),
+                   mnemonic_color = THEMED_RGB(86, 156, 214), flow_color = THEMED_RGB(229, 160, 80),
+                   label_color = THEMED_RGB(230, 219, 140), number_color = THEMED_RGB(181, 206, 168),
+                   string_color = THEMED_RGB(206, 145, 120), head_color = THEMED_RGB(150, 190, 235),
+                   reg_color = g_light_theme ? RGB(0, 96, 144) : RGB(156, 220, 254),
+                   kw_color = g_light_theme ? RGB(128, 0, 128) : RGB(197, 134, 192);
     const bool editor_was_visible = IsWindowVisible(g_editor) != FALSE;
     SendMessageW(g_editor, WM_SETREDRAW, FALSE, 0);
     const auto old_mask = SendMessageW(g_editor, EM_SETEVENTMASK, 0, 0);
@@ -4474,7 +5206,27 @@ void colorize_editor(int tab) {
         CHARFORMAT2W format{}; format.cbSize = sizeof format; format.dwMask = CFM_COLOR; format.crTextColor = color;
         SendMessageW(g_editor, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&format));
     };
-    LONG offset = 0; // position in the rich-edit character stream
+    static const std::set<std::wstring> regs = {
+        L"rax", L"rbx", L"rcx", L"rdx", L"rsi", L"rdi", L"rsp", L"rbp", L"rip",
+        L"r8", L"r9", L"r10", L"r11", L"r12", L"r13", L"r14", L"r15",
+        L"eax", L"ebx", L"ecx", L"edx", L"esi", L"edi", L"esp", L"ebp", L"eip",
+        L"r8d", L"r9d", L"r10d", L"r11d", L"r12d", L"r13d", L"r14d", L"r15d",
+        L"ax", L"bx", L"cx", L"dx", L"si", L"di", L"sp", L"bp",
+        L"al", L"bl", L"cl", L"dl", L"ah", L"bh", L"ch", L"dh",
+        L"sil", L"dil", L"spl", L"bpl", L"r8b", L"r9b", L"r10b", L"r11b"
+    };
+    static const std::set<std::wstring> c_kw = {
+        L"if", L"else", L"while", L"for", L"do", L"switch", L"case", L"default",
+        L"break", L"continue", L"return", L"goto", L"sizeof", L"struct", L"union",
+        L"enum", L"typedef", L"const", L"volatile", L"static", L"extern", L"true", L"false", L"nullptr", L"NULL"
+    };
+    static const std::set<std::wstring> c_types = {
+        L"void", L"bool", L"char", L"short", L"int", L"long", L"unsigned", L"signed",
+        L"float", L"double", L"uint8_t", L"uint16_t", L"uint32_t", L"uint64_t",
+        L"int8_t", L"int16_t", L"int32_t", L"int64_t", L"size_t", L"__int64", L"__int32",
+        L"__int16", L"__int8", L"__fastcall", L"__cdecl", L"__stdcall", L"DWORD", L"QWORD", L"BYTE", L"WORD"
+    };
+    LONG offset = 0;
     std::size_t i = 0;
     int line_number = 0;
     while (i < text.size()) {
@@ -4484,68 +5236,99 @@ void colorize_editor(int tab) {
         const std::wstring line = text.substr(i, content_end - i);
         const LONG base = offset;
         if (!line.empty()) {
-            std::size_t cursor = 0;
-            // "<seg>:<hex address>" prefix, as in IDA.
-            const auto colon = line.find(L':');
-            if (colon != std::wstring::npos && colon < 24 && line.find(L' ') > colon && colon + 9 <= line.size() &&
-                line.find_first_not_of(L"0123456789ABCDEFabcdef", colon + 1) >= colon + 9 && line[0] != L';') {
-                cursor = line.find_first_not_of(L"0123456789ABCDEFabcdef", colon + 1);
-                if (cursor == std::wstring::npos) cursor = line.size();
-                paint(base, base + static_cast<LONG>(cursor), addr_color);
-            } else if (line.rfind(L"0x", 0) == 0) {
-                cursor = line.find_first_not_of(L"0123456789ABCDEFabcdefx");
-                if (cursor == std::wstring::npos) cursor = line.size();
-                paint(base, base + static_cast<LONG>(cursor), addr_color);
-            }
-            // trailing comment
-            auto semicolon = line.find(L';', cursor);
-            if (semicolon != std::wstring::npos) paint(base + static_cast<LONG>(semicolon), base + static_cast<LONG>(line.size()), comment_color);
-            const auto code_end = semicolon == std::wstring::npos ? line.size() : semicolon;
-            if (tab == 1 && semicolon != cursor + 1) {
-                // label line or instruction line
-                const auto first = line.find_first_not_of(L' ', cursor);
-                if (first != std::wstring::npos && first < code_end) {
-                    const auto word_end = line.find_first_of(L" \t", first);
-                    const auto stop = word_end == std::wstring::npos ? line.size() : word_end;
-                    const std::wstring word = line.substr(first, stop - first);
-                    const bool is_label = !word.empty() && (word.back() == L':' || (first - cursor <= 1));
-                    if (is_label) {
-                        paint(base + static_cast<LONG>(first), base + static_cast<LONG>(stop), label_color);
-                    } else {
-                        static const std::set<std::wstring> flow = {L"call", L"jmp", L"ret", L"retn", L"je", L"jne", L"jz", L"jnz", L"jg", L"jge", L"jl", L"jle",
-                            L"ja", L"jae", L"jb", L"jbe", L"js", L"jns", L"loop", L"leave", L"int3", L"syscall", L"hlt"};
-                        paint(base + static_cast<LONG>(first), base + static_cast<LONG>(stop), flow.count(word) ? flow_color : mnemonic_color);
-                        // operands: numbers ending in h, quoted strings
-                        for (std::size_t k = stop; k < code_end; ++k) {
-                            if (line[k] == L'\'') {
-                                const auto close = line.find(L'\'', k + 1);
-                                const auto e = close == std::wstring::npos ? code_end : (std::min)(close + 1, code_end);
-                                paint(base + static_cast<LONG>(k), base + static_cast<LONG>(e), string_color);
-                                k = e;
-                            } else if (std::iswxdigit(line[k]) && (k == stop || !std::iswalnum(line[k - 1]) && line[k - 1] != L'_')) {
-                                std::size_t e = k;
-                                while (e < code_end && std::iswxdigit(line[e])) ++e;
-                                if (e < code_end && line[e] == L'h' && (e + 1 >= code_end || !std::iswalnum(line[e + 1]))) {
-                                    paint(base + static_cast<LONG>(k), base + static_cast<LONG>(e + 1), number_color);
+            if (tab == 2) {
+                const auto slash = line.find(L"//");
+                const auto code_end = slash == std::wstring::npos ? line.size() : slash;
+                if (slash != std::wstring::npos) paint(base + static_cast<LONG>(slash), base + static_cast<LONG>(line.size()), comment_color);
+                for (std::size_t k = 0; k < code_end; ++k) {
+                    if (line[k] == L'"' || line[k] == L'\'') {
+                        const wchar_t q = line[k];
+                        std::size_t e = k + 1;
+                        while (e < code_end && line[e] != q) { if (line[e] == L'\\' && e + 1 < code_end) ++e; ++e; }
+                        if (e < code_end) ++e;
+                        paint(base + static_cast<LONG>(k), base + static_cast<LONG>(e), string_color);
+                        k = e - 1;
+                    } else if (std::isdigit(static_cast<unsigned char>(line[k])) && (k == 0 || (!std::iswalnum(line[k - 1]) && line[k - 1] != L'_'))) {
+                        std::size_t e = k;
+                        while (e < code_end && (std::iswalnum(line[e]) || line[e] == L'x' || line[e] == L'X')) ++e;
+                        paint(base + static_cast<LONG>(k), base + static_cast<LONG>(e), number_color);
+                        k = e - 1;
+                    } else if (std::iswalpha(line[k]) || line[k] == L'_') {
+                        std::size_t e = k;
+                        while (e < code_end && (std::iswalnum(line[e]) || line[e] == L'_')) ++e;
+                        const std::wstring word = line.substr(k, e - k);
+                        if (c_kw.count(word)) paint(base + static_cast<LONG>(k), base + static_cast<LONG>(e), kw_color);
+                        else if (c_types.count(word)) paint(base + static_cast<LONG>(k), base + static_cast<LONG>(e), mnemonic_color);
+                        else if (word.rfind(L"sub_", 0) == 0 || word.rfind(L"loc_", 0) == 0) paint(base + static_cast<LONG>(k), base + static_cast<LONG>(e), label_color);
+                        k = e - 1;
+                    }
+                }
+            } else {
+                std::size_t cursor = 0;
+                const auto colon = line.find(L':');
+                if (colon != std::wstring::npos && colon < 24 && line.find(L' ') > colon && colon + 9 <= line.size() &&
+                    line.find_first_not_of(L"0123456789ABCDEFabcdef", colon + 1) >= colon + 9 && line[0] != L';') {
+                    cursor = line.find_first_not_of(L"0123456789ABCDEFabcdef", colon + 1);
+                    if (cursor == std::wstring::npos) cursor = line.size();
+                    paint(base, base + static_cast<LONG>(cursor), addr_color);
+                } else if (line.rfind(L"0x", 0) == 0) {
+                    cursor = line.find_first_not_of(L"0123456789ABCDEFabcdefx");
+                    if (cursor == std::wstring::npos) cursor = line.size();
+                    paint(base, base + static_cast<LONG>(cursor), addr_color);
+                }
+                auto semicolon = line.find(L';', cursor);
+                if (semicolon != std::wstring::npos) paint(base + static_cast<LONG>(semicolon), base + static_cast<LONG>(line.size()), comment_color);
+                const auto code_end = semicolon == std::wstring::npos ? line.size() : semicolon;
+                if (tab == 1 && semicolon != cursor + 1) {
+                    const auto first = line.find_first_not_of(L' ', cursor);
+                    if (first != std::wstring::npos && first < code_end) {
+                        const auto word_end = line.find_first_of(L" \t", first);
+                        const auto stop = word_end == std::wstring::npos ? line.size() : word_end;
+                        const std::wstring word = line.substr(first, stop - first);
+                        const bool is_label = !word.empty() && (word.back() == L':' || (first - cursor <= 1));
+                        if (is_label) {
+                            paint(base + static_cast<LONG>(first), base + static_cast<LONG>(stop), label_color);
+                        } else {
+                            static const std::set<std::wstring> flow = {L"call", L"jmp", L"ret", L"retn", L"je", L"jne", L"jz", L"jnz", L"jg", L"jge", L"jl", L"jle",
+                                L"ja", L"jae", L"jb", L"jbe", L"js", L"jns", L"loop", L"leave", L"int3", L"syscall", L"hlt"};
+                            paint(base + static_cast<LONG>(first), base + static_cast<LONG>(stop), flow.count(word) ? flow_color : mnemonic_color);
+                            for (std::size_t k = stop; k < code_end; ++k) {
+                                if (line[k] == L'\'' || line[k] == L'"') {
+                                    const auto close = line.find(line[k], k + 1);
+                                    const auto e = close == std::wstring::npos ? code_end : (std::min)(close + 1, code_end);
+                                    paint(base + static_cast<LONG>(k), base + static_cast<LONG>(e), string_color);
                                     k = e;
-                                } else if (e == k + 1 && line[k] >= L'0' && line[k] <= L'9' && (e >= code_end || !std::iswalnum(line[e]))) {
-                                    paint(base + static_cast<LONG>(k), base + static_cast<LONG>(e), number_color);
-                                    k = e;
-                                } else {
-                                    k = e;
+                                } else if (std::iswxdigit(line[k]) && (k == stop || (!std::iswalnum(line[k - 1]) && line[k - 1] != L'_'))) {
+                                    std::size_t e = k;
+                                    while (e < code_end && std::iswxdigit(line[e])) ++e;
+                                    if (e < code_end && line[e] == L'h' && (e + 1 >= code_end || !std::iswalnum(line[e + 1]))) {
+                                        paint(base + static_cast<LONG>(k), base + static_cast<LONG>(e + 1), number_color);
+                                        k = e;
+                                    } else if (line[k] == L'0' && k + 2 < code_end && (line[k + 1] == L'x' || line[k + 1] == L'X')) {
+                                        std::size_t he = k + 2;
+                                        while (he < code_end && std::iswxdigit(line[he])) ++he;
+                                        paint(base + static_cast<LONG>(k), base + static_cast<LONG>(he), number_color);
+                                        k = he - 1;
+                                    } else if (e == k + 1 && line[k] >= L'0' && line[k] <= L'9' && (e >= code_end || !std::iswalnum(line[e]))) {
+                                        paint(base + static_cast<LONG>(k), base + static_cast<LONG>(e), number_color);
+                                        k = e;
+                                    } else {
+                                        k = e;
+                                    }
+                                } else if (std::iswalpha(line[k]) || line[k] == L'_') {
+                                    std::size_t e = k;
+                                    while (e < code_end && (std::iswalnum(line[e]) || line[e] == L'_')) ++e;
+                                    const std::wstring name = line.substr(k, e - k);
+                                    if (name.rfind(L"loc_", 0) == 0 || name.rfind(L"sub_", 0) == 0) paint(base + static_cast<LONG>(k), base + static_cast<LONG>(e), label_color);
+                                    else if (regs.count(name)) paint(base + static_cast<LONG>(k), base + static_cast<LONG>(e), reg_color);
+                                    k = e - 1;
                                 }
-                            } else if (std::iswalpha(line[k]) || line[k] == L'_') {
-                                std::size_t e = k;
-                                while (e < code_end && (std::iswalnum(line[e]) || line[e] == L'_')) ++e;
-                                const std::wstring name = line.substr(k, e - k);
-                                if (name.rfind(L"loc_", 0) == 0 || name.rfind(L"sub_", 0) == 0) paint(base + static_cast<LONG>(k), base + static_cast<LONG>(e), label_color);
-                                k = e - 1;
                             }
                         }
                     }
+                } else if (tab != 1 && tab != 5 && line_number < 2 && semicolon == std::wstring::npos) {
+                    paint(base, base + static_cast<LONG>(line.size()), head_color);
                 }
-            } else if (tab != 1 && tab != 5 && line_number < 2 && semicolon == std::wstring::npos) {
-                paint(base, base + static_cast<LONG>(line.size()), head_color);
             }
         }
         offset += static_cast<LONG>(line.size()) + (eol == std::wstring::npos ? 0 : 1);
@@ -4560,12 +5343,26 @@ void colorize_editor(int tab) {
 }
 
 void select_view(HWND window, int tab) {
+    if (tab == 3) { show_xrefs_popup(window, false); return; }
     if (g_database && g_session_tab != tab) g_session_dirty = true;
     g_session_tab = tab;
-    if (tab == 0) rebuild_graph_model();
-    TabCtrl_SetCurSel(g_tabs, tab);
-    set_editor_text();
-    InvalidateRect(window, nullptr, TRUE);
+    switch (tab) {
+    case 0: g_view_a_graph_mode = true; open_or_focus_view(window, ViewKind::ViewA); break;
+    case 1: g_view_a_graph_mode = false; open_or_focus_view(window, ViewKind::ViewA); break;
+    case 2: open_or_focus_view(window, ViewKind::Pseudocode); break;
+    case 4: open_or_focus_view(window, ViewKind::Debugger); break;
+    case 5: open_or_focus_view(window, ViewKind::Hex); break;
+    case 6: open_or_focus_view(window, ViewKind::LocalTypes); break;
+    case 7: open_or_focus_view(window, ViewKind::Imports); break;
+    case 8: open_or_focus_view(window, ViewKind::Exports); break;
+    case 9: open_or_focus_view(window, ViewKind::Strings); break;
+    case 10: open_or_focus_view(window, ViewKind::Resources); break;
+    case 11: open_or_focus_view(window, ViewKind::Symbols); break;
+    case 12: open_or_focus_view(window, ViewKind::MemoryMap); break;
+    case 13: open_or_focus_view(window, ViewKind::Problems); break;
+    case 14: open_or_focus_view(window, ViewKind::Llil); break;
+    default: open_or_focus_view(window, ViewKind::ViewA); break;
+    }
 }
 
 void search_binary(HWND window) {
@@ -4679,31 +5476,519 @@ std::wstring xref_from_label(std::uint64_t from) {
     return base;
 }
 
-void list_xrefs(HWND window) {
-    if (!g_database || !g_current_address) { MessageBoxW(window, L"Сначала выбери адрес.", L"XREFs", MB_ICONINFORMATION); return; }
-    std::wostringstream result;
-    const auto target_name = xref_symbol(g_current_address, "");
-    result << L"XREFs for 0x" << std::hex << std::uppercase << g_current_address;
-    if (!target_name.empty()) result << L"  (" << target_name << L")";
-    result << L"\r\n\r\nFrom                          To                      Type\r\n";
-    const auto references = g_database->xrefs_at(g_current_address);
-    std::size_t count = 0;
-    for (const auto& reference : references) {
-        const auto& xref = reference.get();
-        std::wstring from_text = xref_from_label(xref.from);
-        std::wostringstream from_cell; from_cell << L"0x" << std::hex << std::uppercase << xref.from;
-        if (!from_text.empty()) from_cell << L" " << from_text;
-        std::wstring from_str = from_cell.str();
-        if (from_str.size() < 30) from_str.append(30 - from_str.size(), L' ');
-        const auto to_name = xref_symbol(xref.to, xref.kind);
-        result << from_str << L"0x" << std::hex << std::uppercase << xref.to << L"  " << wide(xref.kind);
-        if (!to_name.empty()) result << L"  " << to_name;
-        result << L"\r\n";
-        ++count;
+LRESULT CALLBACK dark_list_header_subclass(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam, UINT_PTR, DWORD_PTR) {
+    if (message == WM_ERASEBKGND) return 1;
+    if (message == WM_PAINT) {
+        PAINTSTRUCT ps{}; HDC dc = BeginPaint(hwnd, &ps);
+        RECT client{}; GetClientRect(hwnd, &client);
+        HBRUSH fill = CreateSolidBrush(THEMED_RGB(30, 34, 40)); FillRect(dc, &client, fill); DeleteObject(fill);
+        HGDIOBJ old_font = SelectObject(dc, g_ui_font); SetBkMode(dc, TRANSPARENT); SetTextColor(dc, THEMED_RGB(215, 228, 238));
+        HPEN pen = CreatePen(PS_SOLID, 1, THEMED_RGB(52, 64, 74)); HGDIOBJ old_pen = SelectObject(dc, pen);
+        const int count = Header_GetItemCount(hwnd);
+        for (int i = 0; i < count; ++i) {
+            RECT cell{}; Header_GetItemRect(hwnd, i, &cell);
+            wchar_t label[64]{}; HDITEMW item{}; item.mask = HDI_TEXT | HDI_FORMAT; item.pszText = label; item.cchTextMax = 64; Header_GetItem(hwnd, i, &item);
+            MoveToEx(dc, cell.right - 1, cell.top + 3, nullptr); LineTo(dc, cell.right - 1, cell.bottom - 3);
+            RECT text = cell; text.left += 8; text.right -= 8;
+            DrawTextW(dc, label, -1, &text, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | ((item.fmt & HDF_RIGHT) ? DT_RIGHT : DT_LEFT));
+        }
+        MoveToEx(dc, client.left, client.bottom - 1, nullptr); LineTo(dc, client.right, client.bottom - 1);
+        SelectObject(dc, old_pen); DeleteObject(pen); SelectObject(dc, old_font);
+        EndPaint(hwnd, &ps); return 0;
     }
-    if (!count) result << L"No references found.\r\n";
-    g_xrefs = result.str();
-    select_view(window, 3);
+    return DefSubclassProc(hwnd, message, wparam, lparam);
+}
+
+std::wstring disasm_line_preview(std::uint64_t va) {
+    if (!g_database || !va) return {};
+    if (const auto fn = g_database->function_at(va)) {
+        for (const auto& ins : fn->get().instructions) {
+            if (ins.address == va) return wide(ida_views(*g_database).format_instruction(ins));
+        }
+    }
+    const auto dec = gandon::decode_x64(g_database->image(), va, 1);
+    if (!dec.empty()) return wide(ida_views(*g_database).format_instruction(dec.front()));
+    return {};
+}
+
+void follow_operand_at_cursor(HWND window) {
+    if (!g_database) return;
+    if (!is_graph_view_active() && active_view_kind() != ViewKind::ViewA) {
+        if (const auto addr = editor_line_address(g_editor)) {
+            navigate_to_address(window, *addr, g_view_a_graph_mode ? 0 : 1);
+        }
+        return;
+    }
+    if (!is_graph_view_active() && g_editor) {
+        if (const auto target = editor_line_target_address(g_editor)) {
+            navigate_to_address(window, *target, 1);
+            return;
+        }
+        sync_current_address_from_editor();
+    }
+    if (!g_current_address) return;
+    for (const auto& x : g_database->xrefs()) {
+        if (x.from == g_current_address && x.to && g_database->image().va_to_file_offset(x.to)) {
+            navigate_to_address(window, x.to, is_graph_view_active() ? 0 : 1);
+            return;
+        }
+    }
+    if (const auto fn = g_database->function_at(g_current_address)) {
+        for (const auto& ins : fn->get().instructions) {
+            if (ins.address != g_current_address) continue;
+            const auto pos = ins.operands.find("0x");
+            if (pos != std::string::npos) {
+                try {
+                    const std::uint64_t val = std::stoull(ins.operands.substr(pos), nullptr, 16);
+                    if (g_database->image().va_to_file_offset(val)) {
+                        navigate_to_address(window, val, is_graph_view_active() ? 0 : 1);
+                        return;
+                    }
+                } catch (...) {}
+            }
+            break;
+        }
+    }
+    SetWindowTextW(g_status, L"No navigable operand target at current address.");
+}
+
+void show_xrefs_popup(HWND window, bool prefer_from) {
+    if (!g_database) { MessageBoxW(window, L"Open a binary first.", L"XREFs", MB_ICONINFORMATION); return; }
+    if (!is_graph_view_active() && g_editor && GetFocus() == g_editor) sync_current_address_from_editor();
+    const std::uint64_t addr = g_current_address ? g_current_address : g_database->image().entry_point;
+    if (!addr) return;
+
+    struct XrefRow {
+        std::wstring dir;
+        std::wstring type;
+        std::uint64_t jump_addr{};
+        std::wstring addr_text;
+        std::wstring text;
+        bool is_from{};
+    };
+    struct State {
+        std::vector<XrefRow> all;
+        std::vector<std::size_t> shown;
+        int mode{0}; // 0=To, 1=From, 2=All
+        std::size_t to_count{0}, from_count{0};
+        HWND list{}, filter{}, btn_to{}, btn_from{}, btn_all{};
+        std::uint64_t chosen{0};
+        bool accepted{false};
+    } st;
+
+    for (const auto& xref : g_database->xrefs()) {
+        if (xref.to == addr) {
+            ++st.to_count;
+            wchar_t abuf[32]{}; swprintf_s(abuf, L"0x%llX", static_cast<unsigned long long>(xref.from));
+            std::wstring desc = xref_from_label(xref.from);
+            const auto ins = disasm_line_preview(xref.from);
+            if (!ins.empty()) { if (!desc.empty()) desc += L":  "; desc += ins; }
+            st.all.push_back({L"Up / To", wide(xref.kind), xref.from, abuf, desc, false});
+        }
+        if (xref.from == addr) {
+            ++st.from_count;
+            wchar_t abuf[32]{}; swprintf_s(abuf, L"0x%llX", static_cast<unsigned long long>(xref.to));
+            std::wstring desc = xref_symbol(xref.to, xref.kind);
+            if (desc.empty()) desc = disasm_line_preview(xref.to);
+            st.all.push_back({L"Down / From", wide(xref.kind), xref.to, abuf, desc, true});
+        }
+    }
+    if (prefer_from) st.mode = st.from_count > 0 ? 1 : 2;
+    else st.mode = st.to_count > 0 ? 0 : (st.from_count > 0 ? 2 : 0);
+
+    auto proc = [](HWND dlg, UINT msg, WPARAM wp, LPARAM lp) -> INT_PTR {
+        auto* s = reinterpret_cast<State*>(GetWindowLongPtrW(dlg, DWLP_USER));
+        auto rebuild_now = [](State* stp) {
+            wchar_t qbuf[256]{};
+            if (stp->filter) GetWindowTextW(stp->filter, qbuf, 256);
+            const std::wstring q = lowered(qbuf);
+            stp->shown.clear();
+            for (std::size_t i = 0; i < stp->all.size(); ++i) {
+                const auto& r = stp->all[i];
+                if (stp->mode == 0 && r.is_from) continue;
+                if (stp->mode == 1 && !r.is_from) continue;
+                if (!q.empty()) {
+                    const auto hay = lowered(r.dir + L" " + r.type + L" " + r.addr_text + L" " + r.text);
+                    if (hay.find(q) == std::wstring::npos) continue;
+                }
+                stp->shown.push_back(i);
+            }
+            ListView_SetItemCountEx(stp->list, static_cast<int>(stp->shown.size()), LVSICF_NOINVALIDATEALL);
+            if (!stp->shown.empty()) ListView_SetItemState(stp->list, 0, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+            InvalidateRect(stp->list, nullptr, TRUE);
+        };
+        switch (msg) {
+        case WM_INITDIALOG: {
+            SetWindowLongPtrW(dlg, DWLP_USER, lp);
+            s = reinterpret_cast<State*>(lp);
+            dark_title_bar(dlg);
+            s->filter = GetDlgItem(dlg, 101);
+            s->btn_to = GetDlgItem(dlg, 102);
+            s->btn_from = GetDlgItem(dlg, 103);
+            s->btn_all = GetDlgItem(dlg, 104);
+            s->list = CreateWindowExW(0, WC_LISTVIEWW, L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | LVS_REPORT | LVS_OWNERDATA | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+                12, 40, 740, 320, dlg, reinterpret_cast<HMENU>(static_cast<INT_PTR>(105)), g_instance, nullptr);
+            ListView_SetExtendedListViewStyle(s->list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+            SendMessageW(s->list, WM_SETFONT, reinterpret_cast<WPARAM>(g_code_font), TRUE);
+            ListView_SetBkColor(s->list, THEMED_RGB(24, 27, 32));
+            ListView_SetTextBkColor(s->list, THEMED_RGB(24, 27, 32));
+            ListView_SetTextColor(s->list, THEMED_RGB(215, 228, 238));
+            if (const auto ux = GetModuleHandleW(L"uxtheme.dll")) {
+                using Fn = HRESULT(WINAPI*)(HWND, LPCWSTR, LPCWSTR);
+                if (const auto st = reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(ux, "SetWindowTheme")))) {
+                    if (!g_light_theme) { st(s->list, L"DarkMode_ItemsView", nullptr); st(s->filter, L"DarkMode_CFD", nullptr); }
+                }
+            }
+            const wchar_t* cols[] = {L"Dir", L"Type", L"Address", L"Text"};
+            const int widths[] = {85, 70, 145, 430};
+            for (int i = 0; i < 4; ++i) {
+                LVCOLUMNW col{}; col.mask = LVCF_TEXT | LVCF_WIDTH; col.pszText = const_cast<wchar_t*>(cols[i]); col.cx = widths[i];
+                ListView_InsertColumn(s->list, i, &col);
+            }
+            if (!g_light_theme) if (HWND hdr = ListView_GetHeader(s->list)) SetWindowSubclass(hdr, dark_list_header_subclass, 1, 0);
+            SendMessageW(s->filter, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Filter xrefs (type to filter, Down/Up to select, Enter to jump)..."));
+            SetDlgItemTextW(dlg, 102, (L"To (" + std::to_wstring(s->to_count) + L")").c_str());
+            SetDlgItemTextW(dlg, 103, (L"From (" + std::to_wstring(s->from_count) + L")").c_str());
+            SetDlgItemTextW(dlg, 104, (L"All (" + std::to_wstring(s->all.size()) + L")").c_str());
+            SetWindowSubclass(s->filter, [](HWND hw, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR d) -> LRESULT {
+                auto* stp = reinterpret_cast<State*>(d);
+                if (m == WM_KEYDOWN && stp && stp->list && (w == VK_DOWN || w == VK_UP)) {
+                    const int cnt = static_cast<int>(stp->shown.size());
+                    if (cnt > 0) {
+                        int cur = ListView_GetNextItem(stp->list, -1, LVNI_SELECTED);
+                        int next = (w == VK_DOWN) ? (cur + 1 < cnt ? cur + 1 : 0) : (cur > 0 ? cur - 1 : cnt - 1);
+                        ListView_SetItemState(stp->list, next, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+                        ListView_EnsureVisible(stp->list, next, FALSE);
+                    }
+                    return 0;
+                }
+                return DefSubclassProc(hw, m, w, l);
+            }, 4, reinterpret_cast<DWORD_PTR>(s));
+            RECT rc{}; GetClientRect(dlg, &rc);
+            MoveWindow(s->filter, 12, 10, rc.right - 290, 24, TRUE);
+            MoveWindow(s->btn_to, rc.right - 270, 10, 82, 24, TRUE);
+            MoveWindow(s->btn_from, rc.right - 184, 10, 86, 24, TRUE);
+            MoveWindow(s->btn_all, rc.right - 94, 10, 82, 24, TRUE);
+            MoveWindow(s->list, 12, 42, rc.right - 24, rc.bottom - 86, TRUE);
+            MoveWindow(GetDlgItem(dlg, IDOK), rc.right - 176, rc.bottom - 34, 78, 24, TRUE);
+            MoveWindow(GetDlgItem(dlg, IDCANCEL), rc.right - 90, rc.bottom - 34, 78, 24, TRUE);
+            SendMessageW(dlg, DM_SETDEFID, IDOK, 0);
+            rebuild_now(s);
+            RECT own{}, box{}; GetWindowRect(GetParent(dlg) ? GetParent(dlg) : GetDesktopWindow(), &own); GetWindowRect(dlg, &box);
+            SetWindowPos(dlg, nullptr, own.left + ((own.right - own.left) - (box.right - box.left)) / 2, own.top + ((own.bottom - own.top) - (box.bottom - box.top)) / 3, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+            SetFocus(s->shown.empty() ? s->filter : s->list);
+            return FALSE;
+        }
+        case WM_CTLCOLORDLG: return g_light_theme ? static_cast<INT_PTR>(reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_BTNFACE))) : reinterpret_cast<INT_PTR>(g_background);
+        case WM_CTLCOLOREDIT: {
+            HDC dc = reinterpret_cast<HDC>(wp); SetTextColor(dc, prompt_text_color());
+            if (g_light_theme) { SetBkColor(dc, RGB(255, 255, 255)); return reinterpret_cast<INT_PTR>(GetStockObject(WHITE_BRUSH)); }
+            SetBkColor(dc, THEMED_RGB(24, 27, 32)); return reinterpret_cast<INT_PTR>(g_panel);
+        }
+        case WM_DRAWITEM: {
+            auto* di = reinterpret_cast<DRAWITEMSTRUCT*>(lp);
+            if (!di) break;
+            DRAWITEMSTRUCT copy = *di;
+            if (s && ((di->CtlID == 102 && s->mode == 0) || (di->CtlID == 103 && s->mode == 1) || (di->CtlID == 104 && s->mode == 2))) {
+                copy.itemState |= ODS_FOCUS;
+            }
+            prompt_draw_button(copy);
+            return TRUE;
+        }
+        case WM_NOTIFY: {
+            auto* hdr = reinterpret_cast<LPNMHDR>(lp);
+            if (s && hdr->hwndFrom == s->list) {
+                if (hdr->code == LVN_GETDISPINFOW) {
+                    auto* info = reinterpret_cast<NMLVDISPINFOW*>(lp);
+                    if ((info->item.mask & LVIF_TEXT) && info->item.iItem >= 0 && info->item.iItem < static_cast<int>(s->shown.size())) {
+                        const auto& row = s->all[s->shown[static_cast<std::size_t>(info->item.iItem)]];
+                        static thread_local std::wstring cell;
+                        switch (info->item.iSubItem) {
+                        case 0: cell = row.dir; break;
+                        case 1: cell = row.type; break;
+                        case 2: cell = row.addr_text; break;
+                        default: cell = row.text; break;
+                        }
+                        info->item.pszText = cell.data();
+                    }
+                    return TRUE;
+                }
+                if (hdr->code == NM_DBLCLK) {
+                    const int item = reinterpret_cast<NMITEMACTIVATE*>(lp)->iItem;
+                    if (item >= 0 && item < static_cast<int>(s->shown.size())) {
+                        s->chosen = s->all[s->shown[static_cast<std::size_t>(item)]].jump_addr;
+                        s->accepted = true;
+                        EndDialog(dlg, IDOK);
+                    }
+                    return TRUE;
+                }
+            }
+            break;
+        }
+        case WM_COMMAND:
+            if (!s) break;
+            if (LOWORD(wp) == 101 && HIWORD(wp) == EN_CHANGE) { rebuild_now(s); return TRUE; }
+            if (LOWORD(wp) == 102 || LOWORD(wp) == 103 || LOWORD(wp) == 104) {
+                s->mode = LOWORD(wp) - 102;
+                rebuild_now(s);
+                InvalidateRect(s->btn_to, nullptr, FALSE); InvalidateRect(s->btn_from, nullptr, FALSE); InvalidateRect(s->btn_all, nullptr, FALSE);
+                SetFocus(s->list);
+                return TRUE;
+            }
+            if (LOWORD(wp) == IDOK) {
+                int sel = ListView_GetNextItem(s->list, -1, LVNI_SELECTED);
+                if (sel < 0 && !s->shown.empty()) sel = 0;
+                if (sel >= 0 && sel < static_cast<int>(s->shown.size())) {
+                    s->chosen = s->all[s->shown[static_cast<std::size_t>(sel)]].jump_addr;
+                    s->accepted = true;
+                    EndDialog(dlg, IDOK);
+                } else {
+                    EndDialog(dlg, IDCANCEL);
+                }
+                return TRUE;
+            }
+            if (LOWORD(wp) == IDCANCEL) { EndDialog(dlg, IDCANCEL); return TRUE; }
+            break;
+        }
+        return FALSE;
+    };
+
+    const auto sym = xref_symbol(addr, "");
+    std::wostringstream title;
+    title << (prefer_from ? L"xrefs from " : L"xrefs to ")
+          << (sym.empty() ? [&] { wchar_t b[32]{}; swprintf_s(b, L"0x%llX", static_cast<unsigned long long>(addr)); return std::wstring(b); }() : sym);
+
+    std::vector<BYTE> data(sizeof(DLGTEMPLATE), 0);
+    {
+        DLGTEMPLATE hdr{};
+        hdr.style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_SETFONT;
+        hdr.cdit = 6; hdr.x = 10; hdr.y = 10; hdr.cx = 390; hdr.cy = 230;
+        std::memcpy(data.data(), &hdr, sizeof(hdr));
+    }
+    prompt_word(data, 0); prompt_word(data, 0); prompt_string(data, title.str().c_str()); prompt_word(data, 9); prompt_string(data, L"Segoe UI");
+    auto add_ctrl = [&](DWORD style, short x, short y, short cx, short cy, WORD id, WORD klass, const wchar_t* txt) {
+        while (data.size() & 3u) data.push_back(0);
+        DLGITEMTEMPLATE item{}; item.style = style; item.x = x; item.y = y; item.cx = cx; item.cy = cy; item.id = id;
+        const auto at = data.size(); data.resize(at + sizeof(item)); std::memcpy(data.data() + at, &item, sizeof(item));
+        prompt_word(data, 0xffff); prompt_word(data, klass); prompt_string(data, txt); prompt_word(data, 0);
+    };
+    add_ctrl(WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 6, 6, 220, 14, 101, 0x0081, L"");
+    add_ctrl(WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0000000BL, 232, 6, 48, 14, 102, 0x0080, L"To");
+    add_ctrl(WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0000000BL, 284, 6, 50, 14, 103, 0x0080, L"From");
+    add_ctrl(WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0000000BL, 338, 6, 46, 14, 104, 0x0080, L"All");
+    add_ctrl(WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0000000BL, 284, 210, 46, 14, IDOK, 0x0080, L"Jump");
+    add_ctrl(WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0000000BL, 336, 210, 48, 14, IDCANCEL, 0x0080, L"Close");
+
+    DialogBoxIndirectParamW(g_instance, reinterpret_cast<DLGTEMPLATE*>(data.data()), window, proc, reinterpret_cast<LPARAM>(&st));
+    if (st.accepted && st.chosen) {
+        navigate_to_address(window, st.chosen, is_graph_view_active() ? 0 : 1);
+    }
+}
+
+void list_xrefs(HWND window) {
+    show_xrefs_popup(window, false);
+}
+
+struct PickerRow {
+    std::uint64_t addr{};
+    std::wstring col1;
+    std::wstring col2;
+    std::wstring col3;
+};
+
+std::optional<std::uint64_t> show_picker_popup(HWND window, const wchar_t* title,
+                                               const wchar_t* h1, const wchar_t* h2, const wchar_t* h3,
+                                               std::vector<PickerRow> rows, bool allow_delete = false,
+                                               std::function<void(std::uint64_t)> on_delete = {}) {
+    struct PickerState {
+        std::vector<PickerRow> rows;
+        std::vector<std::size_t> shown;
+        const wchar_t* headers[3]{};
+        bool allow_del{};
+        std::function<void(std::uint64_t)> on_del;
+        HWND list{}, filter{};
+        bool accepted{};
+        std::uint64_t chosen{};
+    } st{std::move(rows), {}, {h1, h2, h3}, allow_delete, std::move(on_delete)};
+
+    auto proc = [](HWND dlg, UINT msg, WPARAM wp, LPARAM lp) -> INT_PTR {
+        auto* s = reinterpret_cast<PickerState*>(GetWindowLongPtrW(dlg, DWLP_USER));
+        auto rebuild_now = [](PickerState* stp) {
+            wchar_t qbuf[256]{};
+            if (stp->filter) GetWindowTextW(stp->filter, qbuf, 256);
+            const std::wstring q = lowered(qbuf);
+            stp->shown.clear();
+            for (std::size_t i = 0; i < stp->rows.size(); ++i) {
+                const auto& r = stp->rows[i];
+                if (!q.empty()) {
+                    const auto hay = lowered(r.col1 + L" " + r.col2 + L" " + r.col3);
+                    if (hay.find(q) == std::wstring::npos) continue;
+                }
+                stp->shown.push_back(i);
+            }
+            ListView_SetItemCountEx(stp->list, static_cast<int>(stp->shown.size()), LVSICF_NOINVALIDATEALL);
+            if (!stp->shown.empty()) ListView_SetItemState(stp->list, 0, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+            InvalidateRect(stp->list, nullptr, TRUE);
+        };
+        switch (msg) {
+        case WM_INITDIALOG: {
+            SetWindowLongPtrW(dlg, DWLP_USER, lp);
+            s = reinterpret_cast<PickerState*>(lp);
+            dark_title_bar(dlg);
+            s->filter = GetDlgItem(dlg, 101);
+            s->list = CreateWindowExW(0, WC_LISTVIEWW, L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | LVS_REPORT | LVS_OWNERDATA | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+                12, 40, 680, 300, dlg, reinterpret_cast<HMENU>(static_cast<INT_PTR>(105)), g_instance, nullptr);
+            ListView_SetExtendedListViewStyle(s->list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+            SendMessageW(s->list, WM_SETFONT, reinterpret_cast<WPARAM>(g_code_font), TRUE);
+            ListView_SetBkColor(s->list, THEMED_RGB(24, 27, 32));
+            ListView_SetTextBkColor(s->list, THEMED_RGB(24, 27, 32));
+            ListView_SetTextColor(s->list, THEMED_RGB(215, 228, 238));
+            if (const auto ux = GetModuleHandleW(L"uxtheme.dll")) {
+                using Fn = HRESULT(WINAPI*)(HWND, LPCWSTR, LPCWSTR);
+                if (const auto st = reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(ux, "SetWindowTheme")))) {
+                    if (!g_light_theme) { st(s->list, L"DarkMode_ItemsView", nullptr); st(s->filter, L"DarkMode_CFD", nullptr); }
+                }
+            }
+            const int widths[] = {160, 210, 300};
+            for (int i = 0; i < 3; ++i) {
+                LVCOLUMNW col{}; col.mask = LVCF_TEXT | LVCF_WIDTH; col.pszText = const_cast<wchar_t*>(s->headers[i]); col.cx = widths[i];
+                ListView_InsertColumn(s->list, i, &col);
+            }
+            if (!g_light_theme) if (HWND hdr = ListView_GetHeader(s->list)) SetWindowSubclass(hdr, dark_list_header_subclass, 1, 0);
+            SendMessageW(s->filter, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Filter..."));
+            RECT rc{}; GetClientRect(dlg, &rc);
+            MoveWindow(s->filter, 12, 10, rc.right - 24, 24, TRUE);
+            MoveWindow(s->list, 12, 40, rc.right - 24, rc.bottom - 84, TRUE);
+            MoveWindow(GetDlgItem(dlg, IDOK), rc.right - 176, rc.bottom - 34, 78, 24, TRUE);
+            MoveWindow(GetDlgItem(dlg, IDCANCEL), rc.right - 90, rc.bottom - 34, 78, 24, TRUE);
+            SendMessageW(dlg, DM_SETDEFID, IDOK, 0);
+            rebuild_now(s);
+            RECT own{}, box{}; GetWindowRect(GetParent(dlg) ? GetParent(dlg) : GetDesktopWindow(), &own); GetWindowRect(dlg, &box);
+            SetWindowPos(dlg, nullptr, own.left + ((own.right - own.left) - (box.right - box.left)) / 2, own.top + ((own.bottom - own.top) - (box.bottom - box.top)) / 3, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+            SetFocus(s->shown.empty() ? s->filter : s->list);
+            return FALSE;
+        }
+        case WM_CTLCOLORDLG: return g_light_theme ? static_cast<INT_PTR>(reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_BTNFACE))) : reinterpret_cast<INT_PTR>(g_background);
+        case WM_CTLCOLOREDIT: {
+            HDC dc = reinterpret_cast<HDC>(wp); SetTextColor(dc, prompt_text_color());
+            if (g_light_theme) { SetBkColor(dc, RGB(255, 255, 255)); return reinterpret_cast<INT_PTR>(GetStockObject(WHITE_BRUSH)); }
+            SetBkColor(dc, THEMED_RGB(24, 27, 32)); return reinterpret_cast<INT_PTR>(g_panel);
+        }
+        case WM_DRAWITEM: prompt_draw_button(*reinterpret_cast<DRAWITEMSTRUCT*>(lp)); return TRUE;
+        case WM_NOTIFY: {
+            auto* hdr = reinterpret_cast<LPNMHDR>(lp);
+            if (s && hdr->hwndFrom == s->list) {
+                if (hdr->code == LVN_GETDISPINFOW) {
+                    auto* info = reinterpret_cast<NMLVDISPINFOW*>(lp);
+                    if ((info->item.mask & LVIF_TEXT) && info->item.iItem >= 0 && info->item.iItem < static_cast<int>(s->shown.size())) {
+                        const auto& row = s->rows[s->shown[static_cast<std::size_t>(info->item.iItem)]];
+                        static thread_local std::wstring cell;
+                        cell = info->item.iSubItem == 0 ? row.col1 : (info->item.iSubItem == 1 ? row.col2 : row.col3);
+                        info->item.pszText = cell.data();
+                    }
+                    return TRUE;
+                }
+                if (hdr->code == NM_DBLCLK) {
+                    const int item = reinterpret_cast<NMITEMACTIVATE*>(lp)->iItem;
+                    if (item >= 0 && item < static_cast<int>(s->shown.size())) {
+                        s->chosen = s->rows[s->shown[static_cast<std::size_t>(item)]].addr;
+                        s->accepted = true;
+                        EndDialog(dlg, IDOK);
+                    }
+                    return TRUE;
+                }
+                if (hdr->code == LVN_KEYDOWN && s->allow_del && reinterpret_cast<NMLVKEYDOWN*>(lp)->wVKey == VK_DELETE) {
+                    const int sel = ListView_GetNextItem(s->list, -1, LVNI_SELECTED);
+                    if (sel >= 0 && sel < static_cast<int>(s->shown.size())) {
+                        const auto idx = s->shown[static_cast<std::size_t>(sel)];
+                        if (s->on_del) s->on_del(s->rows[idx].addr);
+                        s->rows.erase(s->rows.begin() + static_cast<std::ptrdiff_t>(idx));
+                        rebuild_now(s);
+                    }
+                    return TRUE;
+                }
+            }
+            break;
+        }
+        case WM_COMMAND:
+            if (!s) break;
+            if (LOWORD(wp) == 101 && HIWORD(wp) == EN_CHANGE) { rebuild_now(s); return TRUE; }
+            if (LOWORD(wp) == IDOK) {
+                int sel = ListView_GetNextItem(s->list, -1, LVNI_SELECTED);
+                if (sel < 0 && !s->shown.empty()) sel = 0;
+                if (sel >= 0 && sel < static_cast<int>(s->shown.size())) {
+                    s->chosen = s->rows[s->shown[static_cast<std::size_t>(sel)]].addr;
+                    s->accepted = true;
+                }
+                EndDialog(dlg, IDOK);
+                return TRUE;
+            }
+            if (LOWORD(wp) == IDCANCEL) { EndDialog(dlg, IDCANCEL); return TRUE; }
+            break;
+        }
+        return FALSE;
+    };
+    std::vector<BYTE> data(sizeof(DLGTEMPLATE), 0);
+    {
+        DLGTEMPLATE hdr{};
+        hdr.style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_SETFONT;
+        hdr.cdit = 3; hdr.x = 10; hdr.y = 10; hdr.cx = 360; hdr.cy = 220;
+        std::memcpy(data.data(), &hdr, sizeof(hdr));
+    }
+    prompt_word(data, 0); prompt_word(data, 0); prompt_string(data, title); prompt_word(data, 9); prompt_string(data, L"Segoe UI");
+    auto add_ctrl = [&](DWORD style, short x, short y, short cx, short cy, WORD id, WORD klass, const wchar_t* txt) {
+        while (data.size() & 3u) data.push_back(0);
+        DLGITEMTEMPLATE item{}; item.style = style; item.x = x; item.y = y; item.cx = cx; item.cy = cy; item.id = id;
+        const auto at = data.size(); data.resize(at + sizeof(item)); std::memcpy(data.data() + at, &item, sizeof(item));
+        prompt_word(data, 0xffff); prompt_word(data, klass); prompt_string(data, txt); prompt_word(data, 0);
+    };
+    add_ctrl(WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL, 6, 6, 348, 14, 101, 0x0081, L"");
+    add_ctrl(WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0000000BL, 254, 200, 46, 14, IDOK, 0x0080, L"Jump");
+    add_ctrl(WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0000000BL, 306, 200, 48, 14, IDCANCEL, 0x0080, L"Close");
+
+    DialogBoxIndirectParamW(g_instance, reinterpret_cast<DLGTEMPLATE*>(data.data()), window, proc, reinterpret_cast<LPARAM>(&st));
+    if (st.accepted && st.chosen) return st.chosen;
+    return std::nullopt;
+}
+
+void show_bookmarks_popup(HWND window) {
+    if (!g_database) { MessageBoxW(window, L"Open a binary first.", L"Bookmarks", MB_ICONINFORMATION); return; }
+    std::vector<PickerRow> rows;
+    for (const auto addr : g_bookmarks) {
+        wchar_t abuf[32]{}; swprintf_s(abuf, L"0x%llX", static_cast<unsigned long long>(addr));
+        auto sym = xref_symbol(addr, "");
+        if (sym.empty()) sym = xref_from_label(addr);
+        auto desc = disasm_line_preview(addr);
+        if (desc.empty() && g_custom_comments.contains(addr)) desc = g_custom_comments[addr];
+        rows.push_back({addr, abuf, sym, desc});
+    }
+    if (const auto chosen = show_picker_popup(window, L"Jump to a marked position (Ctrl+M)", L"Address", L"Symbol", L"Instruction / Comment",
+                                              std::move(rows), true, [](std::uint64_t a) { g_bookmarks.erase(a); g_session_dirty = true; })) {
+        navigate_to_address(window, *chosen, is_graph_view_active() ? 0 : 1);
+    }
+}
+
+void show_segments_popup(HWND window) {
+    if (!g_database) { MessageBoxW(window, L"Open a binary first.", L"Segments", MB_ICONINFORMATION); return; }
+    std::vector<PickerRow> rows;
+    const auto base = g_database->image().image_base;
+    for (const auto& s : g_database->image().sections) {
+        const auto start = base + s.rva;
+        const auto sz = (std::max<std::uint64_t>)(s.virtual_size, s.raw_size);
+        const auto end = start + sz;
+        wchar_t rbuf[80]{}; swprintf_s(rbuf, L"0x%llX .. 0x%llX", static_cast<unsigned long long>(start), static_cast<unsigned long long>(end));
+        std::wstring perm;
+        perm += (s.characteristics & 0x40000000u) ? L"R" : L"-";
+        perm += (s.characteristics & 0x80000000u) ? L"W" : L"-";
+        perm += (s.characteristics & 0x20000000u) ? L"X" : L"-";
+        perm += L"  (" + std::to_wstring(sz) + L" bytes)";
+        rows.push_back({start, wide(s.name), rbuf, perm});
+    }
+    if (const auto chosen = show_picker_popup(window, L"Jump to segment (Ctrl+Alt+S)", L"Segment", L"Range", L"Permissions / Size", std::move(rows))) {
+        navigate_to_address(window, *chosen, is_graph_view_active() ? 0 : 1);
+    }
 }
 
 bool parse_search_bytes(const std::wstring& query, std::vector<std::uint8_t>& bytes) {
@@ -5228,7 +6513,7 @@ void jump_to_address(HWND window) {
         wchar_t message[160]{}; swprintf_s(message, L"Адрес %llX не принадлежит образу.", static_cast<unsigned long long>(*target));
         SetWindowTextW(g_status, message); MessageBoxW(window, message, L"Jump to address", MB_ICONWARNING); return;
     }
-    const int tab = TabCtrl_GetCurSel(g_tabs);
+    const int tab = active_legacy_tab();
     navigate_to_address(window, *target, (tab == 0 || tab == 2) ? tab : 1);
     wchar_t status[96]{}; swprintf_s(status, L"Jumped to %llX", static_cast<unsigned long long>(*target));
     SetWindowTextW(g_status, status);
@@ -5698,7 +6983,7 @@ std::string handle_request(const std::string& op, const std::vector<std::string>
     }
     if (op == "state") {
         std::ostringstream out;
-        out << std::hex << "address=" << g_current_address << "\ntab=" << std::dec << (g_tabs ? TabCtrl_GetCurSel(g_tabs) : -1)
+        out << std::hex << "address=" << g_current_address << "\ntab=" << std::dec << (g_tabs ? active_legacy_tab() : -1)
             << "\nloaded=" << (g_database ? 1 : 0) << "\ndirty=" << (g_session_dirty ? 1 : 0)
             << "\ndebugging=" << (g_debug_process.load() ? 1 : 0) << "\n";
         return ok(out.str());
@@ -6248,17 +7533,18 @@ void init(HWND main) {
         SetWindowLongPtrW(bars[a], GWLP_USERDATA, a); SetWindowLongPtrW(splitters[a], GWLP_USERDATA, a);
     }
     add(L"navigator", L"Navigator", kLeft, true);
-    add(L"functions", L"Functions", kLeft, false, [](HWND parent) { return funcwin_create(parent); }, true);
+    add(L"functions", L"Functions", kLeft, true, [](HWND parent) { return funcwin_create(parent); }, true);
     add(L"output", L"Output", kBottom, true);
     add(L"python", L"Python", kBottom, false, [](HWND parent) { return pyconsole_create(parent); });
     add(L"types", L"Local Types Editor", kFloat, false, [](HWND parent) { return typewin_create(parent); });
     add(L"diff", L"Diff", kBottom, false, [](HWND parent) { return diffwin_create(parent); }, true);
+    active_id[kLeft] = L"functions";
 }
 
 void reset_defaults() {
     sizes[kLeft] = 290; sizes[kRight] = 360; sizes[kBottom] = 150;
     struct Default { const wchar_t* id; Area area; bool visible; };
-    const Default defaults[] = {{L"navigator", kLeft, true}, {L"functions", kLeft, false}, {L"output", kBottom, true}, {L"python", kBottom, false}, {L"types", kFloat, false}, {L"diff", kBottom, false}};
+    const Default defaults[] = {{L"navigator", kLeft, true}, {L"functions", kLeft, true}, {L"output", kBottom, true}, {L"python", kBottom, false}, {L"types", kFloat, false}, {L"diff", kBottom, false}};
     for (const auto& d : defaults) {
         Panel* p = find(d.id);
         if (!p) continue;
@@ -6476,7 +7762,7 @@ void rebuild() {
 
 void go(int index) {
     if (index < 0 || index >= static_cast<int>(shown.size()) || !g_database) return;
-    navigate_to_address(g_main_window, shown[static_cast<std::size_t>(index)].start, g_tabs && TabCtrl_GetCurSel(g_tabs) == 0 ? 0 : 1);
+    navigate_to_address(g_main_window, shown[static_cast<std::size_t>(index)].start, is_graph_view_active() ? 0 : 1);
 }
 
 LRESULT CALLBACK header_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam, UINT_PTR, DWORD_PTR) {
@@ -6855,7 +8141,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
             const int index = reinterpret_cast<NMITEMACTIVATE*>(lparam)->iItem;
             if (index >= 0 && index < static_cast<int>(shown.size()) && g_database) {
                 const auto& e = *shown[static_cast<std::size_t>(index)];
-                if (e.a_start) navigate_to_address(g_main_window, e.a_start, g_tabs && TabCtrl_GetCurSel(g_tabs) == 0 ? 0 : 1);
+                if (e.a_start) navigate_to_address(g_main_window, e.a_start, is_graph_view_active() ? 0 : 1);
             }
         }
         return 0;
@@ -7424,7 +8710,7 @@ void start_debugger(HWND window) {
     if (g_debug_process.load()) {
         if (request_debug_resume(DebugResumeMode::Continue)) {
             SetWindowTextW(g_status, L"Debug process continued.");
-            if (TabCtrl_GetCurSel(g_tabs) == 4) set_editor_text();
+            if (active_view_kind() == ViewKind::Debugger) set_editor_text();
         } else
             SetWindowTextW(g_status, L"Debug process is already running.");
         return;
@@ -8558,7 +9844,7 @@ struct UAHMENUITEMMETRICS { DWORD cx, cy; };
 struct UAHMENUITEM { int position; UAHMENUITEMMETRICS bar[2]; UAHMENUITEMMETRICS popup[4]; DWORD popup_widths[4]; DWORD update_max_widths; };
 struct UAHDRAWMENUITEM { DRAWITEMSTRUCT dis; UAHMENU menu; UAHMENUITEM item; };
 
-COLORREF dark_menu_color() { return RGB(43, 43, 43); }
+COLORREF dark_menu_color() { return RGB(43, 45, 48); }
 
 void enable_dark_popup_menus() {
     if (g_light_theme) return;
@@ -8618,7 +9904,7 @@ LRESULT CALLBACK dark_border_subclass(HWND window, UINT message, WPARAM wparam, 
         const LRESULT result = DefSubclassProc(window, message, wparam, lparam);
         RECT rect{}; GetWindowRect(window, &rect); OffsetRect(&rect, -rect.left, -rect.top);
         HDC dc = GetWindowDC(window);
-        HBRUSH brush = CreateSolidBrush(g_light_theme ? RGB(160, 160, 160) : RGB(78, 78, 78));
+        HBRUSH brush = CreateSolidBrush(g_light_theme ? RGB(160, 160, 160) : RGB(67, 69, 74));
         FrameRect(dc, &rect, brush); DeleteObject(brush);
         ReleaseDC(window, dc);
         return result;
@@ -8666,77 +9952,136 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         AppendMenuW(edit, MF_POPUP, reinterpret_cast<UINT_PTR>(build_patch_submenu()), L"Patch Branch / Stub");
         AppendMenuW(edit, MF_STRING, ID_UNDO_PATCH, L"Undo Patch\tCtrl+Z"); AppendMenuW(edit, MF_STRING, ID_REDO_PATCH, L"Redo Patch\tCtrl+Y");
         HMENU jump = CreatePopupMenu();
-        AppendMenuW(jump, MF_STRING, ID_JUMP_ADDR, L"Jump to Address / Label...\tCtrl+G");
+        AppendMenuW(jump, MF_STRING, ID_JUMP_ADDR, L"Jump to Address / Label...\tG");
+        AppendMenuW(jump, MF_STRING, ID_FIND_FUNCTION, L"Jump to Function...\tCtrl+P");
+        AppendMenuW(jump, MF_STRING, ID_JUMP_SEGMENT, L"Jump to Segment...\tCtrl+Alt+S");
         AppendMenuW(jump, MF_STRING, ID_JUMP_BACK, L"Jump Back\tEsc");
         AppendMenuW(jump, MF_STRING, ID_JUMP_FORWARD, L"Jump Forward\tCtrl+Enter");
-        AppendMenuW(jump, MF_STRING, ID_TOGGLE_BOOKMARK, L"Toggle Bookmark");
+        AppendMenuW(jump, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(jump, MF_STRING, ID_FOLLOW_CURSOR_ENTER, L"Jump to Operand\tEnter");
+        AppendMenuW(jump, MF_STRING, ID_LIST_XREFS, L"Jump to xref to operand...\tX");
+        AppendMenuW(jump, MF_STRING, ID_XREFS_FROM, L"Jump to xref from...\tCtrl+J");
+        AppendMenuW(jump, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(jump, MF_STRING, ID_TOGGLE_BOOKMARK, L"Mark position\tAlt+M");
+        AppendMenuW(jump, MF_STRING, ID_BOOKMARKS_POPUP, L"Jump to marked position...\tCtrl+M");
         AppendMenuW(jump, MF_STRING, ID_NEXT_BOOKMARK, L"Next Bookmark");
-        AppendMenuW(jump, MF_STRING, ID_LIST_XREFS, L"List XREFs");
-        AppendMenuW(jump, MF_STRING, ID_FIND_FUNCTION, L"Find Function...	Ctrl+G");
+        AppendMenuW(jump, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(jump, MF_STRING, ID_CALL_GRAPH, L"Call Graph");
         AppendMenuW(jump, MF_STRING, ID_PATHFINDER, L"Find Call Path...");
+
+        HMENU mcp_menu = CreatePopupMenu();
+        AppendMenuW(mcp_menu, MF_STRING | MF_CHECKED, ID_MCP_TOGGLE, L"Run Built-in MCP Server");
+        AppendMenuW(mcp_menu, MF_STRING, ID_MCP_CONFIG, L"Configure Port / Host / Token...");
+        AppendMenuW(mcp_menu, MF_STRING, ID_MCP_COPY_URL, L"Copy MCP Endpoint URL");
+        AppendMenuW(mcp_menu, MF_STRING, ID_MCP_COPY_CONFIG, L"Copy MCP Client JSON Config");
+        AppendMenuW(mcp_menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(mcp_menu, MF_STRING, ID_MCP_STATUS, L"MCP Server Status...");
+
+        HMENU unpack_menu = CreatePopupMenu();
+        AppendMenuW(unpack_menu, MF_STRING, ID_DUMP_MODULE, L"Dump Unpacked Module + Rebuild IAT...");
+        AppendMenuW(unpack_menu, MF_STRING, ID_DETECT_VM, L"Detect VM Dispatcher / Flattening");
+        AppendMenuW(unpack_menu, MF_STRING, ID_TRACE_VM, L"Trace VM Handlers");
+        AppendMenuW(unpack_menu, MF_STRING, ID_DEVIRT_VM, L"Devirtualize VM Handlers (decompile)");
+        AppendMenuW(unpack_menu, MF_STRING, ID_EMULATE_DECRYPT, L"Emulate String Decryptor");
+        AppendMenuW(unpack_menu, MF_STRING, ID_ANALYZE_DOTNET, L"Analyze .NET Metadata");
+        AppendMenuW(unpack_menu, MF_STRING, ID_RECOVER_RTTI, L"Recover RTTI / C++ Classes");
+        AppendMenuW(unpack_menu, MF_STRING, ID_ANALYZE_DRIVER, L"Analyze Kernel Driver (IRP / IOCTL)");
+
+        HMENU emu_menu = CreatePopupMenu();
+        AppendMenuW(emu_menu, MF_STRING, ID_EMULATE_PREPARE, L"Prepare Emulation at Current Address...");
+        AppendMenuW(emu_menu, MF_STRING, ID_EMULATE, L"Run / Continue Emulation (Unicorn)...");
+        AppendMenuW(emu_menu, MF_STRING, ID_EMULATE_STEP, L"Step Emulation");
+        AppendMenuW(emu_menu, MF_STRING, ID_EMULATE_STEP_OVER, L"Step Over Call");
+        AppendMenuW(emu_menu, MF_STRING, ID_EMULATE_STEP_OUT, L"Step Out of Function");
+        AppendMenuW(emu_menu, MF_STRING, ID_EMULATE_BREAKPOINT, L"Toggle Emulation Breakpoint");
+        AppendMenuW(emu_menu, MF_STRING, ID_EMULATE_WATCHPOINT, L"Add Emulation Watchpoint...");
+        AppendMenuW(emu_menu, MF_STRING, ID_EMULATE_CLEAR_WATCHPOINTS, L"Clear Emulation Watchpoints");
+        AppendMenuW(emu_menu, MF_STRING, ID_EMULATE_REGISTER_DELTAS, L"Toggle Register-Delta Trace");
+        AppendMenuW(emu_menu, MF_STRING, ID_EMULATE_CLEAR_HISTORY, L"Clear Trace / Memory History");
+        AppendMenuW(emu_menu, MF_STRING, ID_EMULATE_SET_REGISTER, L"Set Emulated Register...");
+        AppendMenuW(emu_menu, MF_STRING, ID_EMULATE_WRITE_MEMORY, L"Write Emulated Memory...");
+        AppendMenuW(emu_menu, MF_STRING, ID_EMULATE_RESET, L"Reset Emulation Session");
+
+        HMENU llil_menu = CreatePopupMenu();
+        AppendMenuW(llil_menu, MF_STRING, ID_LLIL_LIFT, L"Lift Current Function to LLIL...");
+        AppendMenuW(llil_menu, MF_STRING, ID_LLIL_STEP, L"Step LLIL");
+        AppendMenuW(llil_menu, MF_STRING, ID_LLIL_RUN, L"Run LLIL (100k limit)");
+        AppendMenuW(llil_menu, MF_STRING, ID_LLIL_SET_REGISTER, L"Set LLIL Register...");
+        AppendMenuW(llil_menu, MF_STRING, ID_LLIL_WRITE_MEMORY, L"Set LLIL Memory...");
+        AppendMenuW(llil_menu, MF_STRING, ID_LLIL_RESET, L"Reset LLIL Emulator");
+
+        HMENU live_menu = CreatePopupMenu();
+        AppendMenuW(live_menu, MF_STRING, ID_MEMORY_VIEW, L"Memory View");
+        AppendMenuW(live_menu, MF_STRING, ID_MEMORY_SNAPSHOT, L"Memory Snapshot");
+        AppendMenuW(live_menu, MF_STRING, ID_MEMORY_COMPARE, L"Compare Memory Snapshot");
+        AppendMenuW(live_menu, MF_STRING, ID_WATCH_LOCALS, L"Watch / Locals");
+        AppendMenuW(live_menu, MF_STRING, ID_CALL_STACK, L"Threads / Call Stack");
+        AppendMenuW(live_menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(live_menu, MF_STRING, ID_SEARCH_PROCESS_MEMORY, L"Search Process Memory...");
+        AppendMenuW(live_menu, MF_STRING, ID_POINTER_SCAN, L"Pointer Scan (Live Process)...");
+        AppendMenuW(live_menu, MF_STRING, ID_POINTER_RESCAN, L"Re-scan Pointer Chains...");
+        AppendMenuW(live_menu, MF_STRING, ID_STRUCT_DUMP, L"Dump Live Structure...");
+        AppendMenuW(live_menu, MF_STRING, ID_LIVE_EXPORT, L"Export Live Result...");
+        AppendMenuW(live_menu, MF_STRING, ID_LIVE_CANCEL, L"Cancel Live Operation");
+        AppendMenuW(live_menu, MF_STRING | MF_UNCHECKED, ID_KERNEL_BACKEND, L"Use Kernel Memory Reader");
+        AppendMenuW(live_menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(live_menu, MF_STRING, ID_EXPORT_DEBUG_LOG, L"Export Debug Event Log...");
+        AppendMenuW(live_menu, MF_STRING | MF_UNCHECKED, ID_TRACE_TOGGLE, L"Trace Debug Events");
+        AppendMenuW(live_menu, MF_STRING, ID_EXPORT_TRACE, L"Export Trace...");
+
         HMENU tools = CreatePopupMenu();
-        AppendMenuW(tools, MF_STRING, ID_DECOMPILE, L"Decompile to Pseudocode\tF5"); AppendMenuW(tools, MF_STRING, ID_SIGMAKER, L"SigMaker: Generate Gandon Signature\tCtrl+B");
-        AppendMenuW(tools, MF_STRING, ID_SEARCH_SIGNATURE, L"Search Gandon Signature Pattern...\tCtrl+Shift+F"); AppendMenuW(tools, MF_STRING, ID_CALL_GRAPH, L"Call Graph");
-        AppendMenuW(tools, MF_STRING, ID_MEMORY_VIEW, L"Memory View"); AppendMenuW(tools, MF_STRING, ID_MEMORY_SNAPSHOT, L"Memory Snapshot"); AppendMenuW(tools, MF_STRING, ID_MEMORY_COMPARE, L"Compare Memory Snapshot"); AppendMenuW(tools, MF_STRING, ID_WATCH_LOCALS, L"Watch / Locals"); AppendMenuW(tools, MF_STRING, ID_CALL_STACK, L"Threads / Call Stack");
-        AppendMenuW(tools, MF_STRING, ID_COMPARE, L"Compare Binary..."); AppendMenuW(tools, MF_STRING, ID_DIFF_FUNCTIONS, L"Diff Functions with Binary..."); AppendMenuW(tools, MF_STRING, ID_PLUGIN_LOAD, L"Load Python Plugin..."); AppendMenuW(tools, MF_STRING, ID_PY_CONSOLE, L"Python Console"); AppendMenuW(tools, MF_STRING, ID_SEARCH, L"Search Text / Address...\tCtrl+F");
-        AppendMenuW(tools, MF_STRING, ID_EXPORT_DEBUG_LOG, L"Export Debug Event Log...");
-        AppendMenuW(tools, MF_STRING | MF_UNCHECKED, ID_TRACE_TOGGLE, L"Trace Debug Events");
-        AppendMenuW(tools, MF_STRING, ID_EXPORT_TRACE, L"Export Trace...");
-        AppendMenuW(tools, MF_STRING, ID_SEARCH_PROCESS_MEMORY, L"Search Process Memory...");
-        AppendMenuW(tools, MF_STRING, ID_POINTER_SCAN, L"Pointer Scan (Live Process)...");
-        AppendMenuW(tools, MF_STRING, ID_POINTER_RESCAN, L"Re-scan Pointer Chains...");
-        AppendMenuW(tools, MF_STRING, ID_STRUCT_DUMP, L"Dump Live Structure...");
-        AppendMenuW(tools, MF_STRING, ID_LIVE_EXPORT, L"Export Live Result...");
-        AppendMenuW(tools, MF_STRING, ID_LIVE_CANCEL, L"Cancel Live Operation");
-        AppendMenuW(tools, MF_STRING | MF_UNCHECKED, ID_KERNEL_BACKEND, L"Use Kernel Memory Reader (signed driver required)");
-        AppendMenuW(tools, MF_STRING, ID_EMULATE_PREPARE, L"Prepare Emulation at Current Address...");
-        AppendMenuW(tools, MF_STRING, ID_EMULATE, L"Run / Continue Emulation (Unicorn)...");
-        AppendMenuW(tools, MF_STRING, ID_EMULATE_STEP, L"Step Emulation");
-        AppendMenuW(tools, MF_STRING, ID_EMULATE_STEP_OVER, L"Step Over Call (Emulation)");
-        AppendMenuW(tools, MF_STRING, ID_EMULATE_STEP_OUT, L"Step Out of Function (Emulation)");
-        AppendMenuW(tools, MF_STRING, ID_EMULATE_BREAKPOINT, L"Toggle Emulation Breakpoint at Current Address");
-        AppendMenuW(tools, MF_STRING, ID_EMULATE_WATCHPOINT, L"Add Emulation Watchpoint at Current Address...");
-        AppendMenuW(tools, MF_STRING, ID_EMULATE_CLEAR_WATCHPOINTS, L"Clear Emulation Watchpoints");
-        AppendMenuW(tools, MF_STRING, ID_EMULATE_REGISTER_DELTAS, L"Toggle Emulation Register-Delta Trace");
-        AppendMenuW(tools, MF_STRING, ID_EMULATE_CLEAR_HISTORY, L"Clear Emulation Trace / Memory History");
-        AppendMenuW(tools, MF_STRING, ID_EMULATE_SET_REGISTER, L"Set Emulated Register...");
-        AppendMenuW(tools, MF_STRING, ID_EMULATE_WRITE_MEMORY, L"Write Emulated Memory...");
-        AppendMenuW(tools, MF_STRING, ID_EMULATE_RESET, L"Reset Emulation Session");
+        AppendMenuW(tools, MF_STRING, ID_DECOMPILE, L"Decompile to Pseudocode\tF5");
+        AppendMenuW(tools, MF_STRING, ID_SIGMAKER, L"SigMaker: Generate Signature\tCtrl+B");
+        AppendMenuW(tools, MF_STRING, ID_SEARCH_SIGNATURE, L"Search Signature Pattern...\tCtrl+Shift+F");
+        AppendMenuW(tools, MF_STRING, ID_COMPARE, L"Compare Binary...");
+        AppendMenuW(tools, MF_STRING, ID_DIFF_FUNCTIONS, L"Diff Functions with Binary...");
+        AppendMenuW(tools, MF_STRING, ID_PY_CONSOLE, L"Python Console");
+        AppendMenuW(tools, MF_STRING, ID_SEARCH, L"Search Text / Address...\tCtrl+F");
         AppendMenuW(tools, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(tools, MF_STRING, ID_LLIL_LIFT, L"Lift Current Function to LLIL (Experimental)...");
-        AppendMenuW(tools, MF_STRING, ID_LLIL_STEP, L"Step LLIL");
-        AppendMenuW(tools, MF_STRING, ID_LLIL_RUN, L"Run LLIL (100,000 statement limit)");
-        AppendMenuW(tools, MF_STRING, ID_LLIL_SET_REGISTER, L"Set LLIL Register...");
-        AppendMenuW(tools, MF_STRING, ID_LLIL_WRITE_MEMORY, L"Set LLIL Memory...");
-        AppendMenuW(tools, MF_STRING, ID_LLIL_RESET, L"Reset LLIL Emulator");
+        AppendMenuW(tools, MF_POPUP, reinterpret_cast<UINT_PTR>(mcp_menu), L"MCP Server (Built-in)");
+        AppendMenuW(tools, MF_POPUP, reinterpret_cast<UINT_PTR>(unpack_menu), L"Unpacking / Protection / RTTI");
+        AppendMenuW(tools, MF_POPUP, reinterpret_cast<UINT_PTR>(emu_menu), L"CPU Emulation (Unicorn)");
+        AppendMenuW(tools, MF_POPUP, reinterpret_cast<UINT_PTR>(llil_menu), L"Experimental LLIL");
+        AppendMenuW(tools, MF_POPUP, reinterpret_cast<UINT_PTR>(live_menu), L"Live Process Memory");
+        AppendMenuW(tools, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(tools, MF_STRING, ID_HIDDEN_SYMBOLS, L"Hidden Symbols...");
         AppendMenuW(tools, MF_STRING, ID_RESTORE_HIDDEN, L"Restore All Hidden Symbols");
-        AppendMenuW(tools, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(tools, MF_STRING, ID_DUMP_MODULE, L"Dump Unpacked Module + Rebuild IAT...");
-        AppendMenuW(tools, MF_STRING, ID_DETECT_VM, L"Detect VM Dispatcher / Flattening (current function)");
-        AppendMenuW(tools, MF_STRING, ID_TRACE_VM, L"Trace VM Handlers (emulate from current address)");
-        AppendMenuW(tools, MF_STRING, ID_DEVIRT_VM, L"Devirtualize VM Handlers (decompile)");
-        AppendMenuW(tools, MF_STRING, ID_EMULATE_DECRYPT, L"Emulate String Decryptor (current function)");
-        AppendMenuW(tools, MF_STRING, ID_ANALYZE_DOTNET, L"Analyze .NET Metadata");
-        AppendMenuW(tools, MF_STRING, ID_RECOVER_RTTI, L"Recover RTTI / C++ Classes");
-        AppendMenuW(tools, MF_STRING, ID_ANALYZE_DRIVER, L"Analyze Kernel Driver (IRP / IOCTL)");
+
         HMENU debugger = CreatePopupMenu();
         AppendMenuW(debugger, MF_STRING, ID_RUN, L"Start / Continue Process\tF9"); AppendMenuW(debugger, MF_STRING, ID_PAUSE, L"Pause Process\tF6"); AppendMenuW(debugger, MF_STRING, ID_STEP_INTO, L"Step Into\tF7"); AppendMenuW(debugger, MF_STRING, ID_STEP_OVER, L"Step Over\tF8");
         AppendMenuW(debugger, MF_STRING, ID_ANTI_DEBUG, L"Anti-anti-debug: PEB flags (reversible)");
         AppendMenuW(debugger, MF_STRING, ID_ANTIDEBUG_STATUS, L"Anti-anti-debug Status");
         AppendMenuW(debugger, MF_STRING, ID_TOGGLE_BP, L"Toggle Breakpoint\tF2"); AppendMenuW(debugger, MF_STRING, ID_COND_BP, L"Set Conditional Breakpoint..."); AppendMenuW(debugger, MF_STRING, ID_CONFIG_BP, L"Configure Breakpoint..."); AppendMenuW(debugger, MF_STRING, ID_BP_MANAGER, L"Breakpoint Manager...");
         AppendMenuW(debugger, MF_STRING, ID_HW_BP, L"Toggle Hardware Breakpoint"); AppendMenuW(debugger, MF_STRING, ID_DELETE_BP, L"Delete Selected Breakpoint\tDel"); AppendMenuW(debugger, MF_STRING, ID_STOP, L"Stop Process");
+
+        HMENU subviews = CreatePopupMenu();
+        AppendMenuW(subviews, MF_STRING, ID_VIEW_GRAPH, L"Disassembly (IDA View-A)\tSpace");
+        AppendMenuW(subviews, MF_STRING, ID_VIEW_LISTING, L"Text Listing");
+        AppendMenuW(subviews, MF_STRING, ID_DECOMPILE, L"Pseudocode\tF5");
+        AppendMenuW(subviews, MF_STRING, ID_VIEW_HEX, L"Hex dump");
+        AppendMenuW(subviews, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(subviews, MF_STRING, ID_VIEW_FUNCTIONS, L"Functions\tShift+F3");
+        AppendMenuW(subviews, MF_STRING, ID_VIEW_SYMBOLS, L"Names\tShift+F4");
+        AppendMenuW(subviews, MF_STRING, ID_VIEW_MEMORY, L"Segments\tShift+F7");
+        AppendMenuW(subviews, MF_STRING, ID_VIEW_STRINGS, L"Strings\tShift+F12");
+        AppendMenuW(subviews, MF_STRING, ID_VIEW_IMPORTS, L"Imports");
+        AppendMenuW(subviews, MF_STRING, ID_VIEW_EXPORTS, L"Exports");
+        AppendMenuW(subviews, MF_STRING, ID_VIEW_RESOURCES, L"Resources");
+        AppendMenuW(subviews, MF_STRING, ID_VIEW_TYPES, L"Local Types\tShift+F1");
+        AppendMenuW(subviews, MF_STRING, ID_VIEW_PROBLEMS, L"Problems");
+        AppendMenuW(subviews, MF_STRING, ID_VIEW_DEBUGGER, L"Debugger");
+        AppendMenuW(subviews, MF_STRING, ID_VIEW_LLIL, L"Experimental LLIL");
+
         HMENU view = CreatePopupMenu();
-        AppendMenuW(view, MF_STRING, ID_TOGGLE_GRAPH_LIST, L"Switch Graph / Text Listing	Space");
-        AppendMenuW(view, MF_STRING, ID_FIT_GRAPH, L"Fit Graph	Home");
-        AppendMenuW(view, MF_STRING | MF_CHECKED, ID_TOGGLE_MINIMAP, L"Graph Minimap");
+        AppendMenuW(view, MF_POPUP, reinterpret_cast<UINT_PTR>(subviews), L"Open subviews");
         AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(view, MF_STRING, ID_VIEW_GRAPH, L"Gandon View-A (Graph)\tSpace"); AppendMenuW(view, MF_STRING, ID_VIEW_LISTING, L"Gandon Text Listing"); AppendMenuW(view, MF_STRING, ID_VIEW_PSEUDO, L"Pseudocode-A (F5)"); AppendMenuW(view, MF_STRING, ID_VIEW_DEBUGGER, L"Debugger Win32"); AppendMenuW(view, MF_STRING, ID_VIEW_HEX, L"Hex View-1");
-        AppendMenuW(view, MF_STRING, ID_VIEW_LLIL, L"Experimental LLIL Emulation");
-        AppendMenuW(view, MF_STRING, ID_VIEW_FUNCTIONS, L"Functions window\tShift+F3");
+        AppendMenuW(view, MF_STRING, ID_TOGGLE_GRAPH_LIST, L"Switch Graph / Text\tSpace");
+        AppendMenuW(view, MF_STRING, ID_SWITCH_PSEUDO_DISASM, L"Switch Disasm / Pseudocode\tTab");
+        AppendMenuW(view, MF_STRING, ID_FIT_GRAPH, L"Fit Graph\tHome");
+        AppendMenuW(view, MF_STRING | MF_CHECKED, ID_TOGGLE_MINIMAP, L"Graph Overview");
+        AppendMenuW(view, MF_STRING, ID_REFRESH, L"Refresh Views\tCtrl+F5");
         dock::append_menu(view);
-        AppendMenuW(view, MF_SEPARATOR, 0, nullptr); AppendMenuW(view, MF_STRING, ID_VIEW_TYPES, L"Local Types"); AppendMenuW(view, MF_STRING, ID_VIEW_IMPORTS, L"Imports"); AppendMenuW(view, MF_STRING, ID_VIEW_EXPORTS, L"Exports"); AppendMenuW(view, MF_STRING, ID_VIEW_STRINGS, L"Strings\tShift+F12"); AppendMenuW(view, MF_STRING, ID_VIEW_RESOURCES, L"Resources"); AppendMenuW(view, MF_STRING, ID_VIEW_SYMBOLS, L"Symbols / Debug Info"); AppendMenuW(view, MF_STRING, ID_VIEW_MEMORY, L"Memory Map"); AppendMenuW(view, MF_STRING, ID_VIEW_PROBLEMS, L"Problems / Events");
+
         HMENU help = CreatePopupMenu(); AppendMenuW(help, MF_STRING, ID_ABOUT, L"About Gandon-PRO...");
         HMENU plugins = CreatePopupMenu();
         AppendMenuW(plugins, MF_STRING, ID_PLUGIN_LOAD, L"Load Python Plugin...");
@@ -8746,29 +10091,30 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         AppendMenuW(plugins, MF_STRING, ID_NATIVE_PLUGIN_LOAD, L"Load Native DLL Plugins");
         g_plugins_menu = plugins;
         HMENU search_menu = CreatePopupMenu();
-        AppendMenuW(search_menu, MF_STRING, ID_JUMP_ADDR, L"Jump to Address / Label...\tCtrl+G");
-        AppendMenuW(search_menu, MF_STRING, ID_FIND_FUNCTION, L"Find Function...\tCtrl+Shift+G");
-        AppendMenuW(search_menu, MF_STRING, ID_SEARCH_SIGNATURE, L"Signature Pattern...\tCtrl+Shift+F");
+        AppendMenuW(search_menu, MF_STRING, ID_SEARCH, L"Text / Hex / Regex...\tAlt+T");
+        AppendMenuW(search_menu, MF_STRING, ID_SEARCH_SIGNATURE, L"Sequence of bytes / Signature...\tAlt+B");
         AppendMenuW(search_menu, MF_STRING, ID_SEARCH_PROCESS_MEMORY, L"Process Memory...");
-        AppendMenuW(search_menu, MF_STRING, ID_LIST_XREFS, L"List XREFs");
+        AppendMenuW(search_menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(search_menu, MF_STRING, ID_LIST_XREFS, L"List Cross-References...\tX");
+        AppendMenuW(search_menu, MF_STRING, ID_FIND_FUNCTION, L"Find Function...\tCtrl+P");
         HMENU options_menu = CreatePopupMenu();
         AppendMenuW(options_menu, MF_STRING, ID_HIDDEN_SYMBOLS, L"Hidden Symbols...");
         AppendMenuW(options_menu, MF_STRING, ID_RESTORE_HIDDEN, L"Restore All Hidden Symbols");
         AppendMenuW(options_menu, MF_STRING | MF_CHECKED, ID_TOGGLE_MINIMAP, L"Graph Overview");
         HMENU windows_menu = CreatePopupMenu();
-        AppendMenuW(windows_menu, MF_STRING, ID_VIEW_GRAPH, L"Gandon View-A (graph)");
-        AppendMenuW(windows_menu, MF_STRING, ID_VIEW_LISTING, L"Text Listing");
+        AppendMenuW(windows_menu, MF_STRING, ID_VIEW_GRAPH, L"IDA View-A (Graph)");
+        AppendMenuW(windows_menu, MF_STRING, ID_VIEW_LISTING, L"IDA View-A (Text)");
         AppendMenuW(windows_menu, MF_STRING, ID_VIEW_PSEUDO, L"Pseudocode-A");
         AppendMenuW(windows_menu, MF_STRING, ID_VIEW_HEX, L"Hex View-1");
         AppendMenuW(windows_menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(windows_menu, MF_STRING, ID_VIEW_IMPORTS, L"Imports");
         AppendMenuW(windows_menu, MF_STRING, ID_VIEW_EXPORTS, L"Exports");
-        AppendMenuW(windows_menu, MF_STRING, ID_VIEW_STRINGS, L"Strings");
+        AppendMenuW(windows_menu, MF_STRING, ID_VIEW_STRINGS, L"Strings\tShift+F12");
         AppendMenuW(windows_menu, MF_STRING, ID_VIEW_RESOURCES, L"Resources");
-        AppendMenuW(windows_menu, MF_STRING, ID_VIEW_SYMBOLS, L"Names");
-        AppendMenuW(windows_menu, MF_STRING, ID_VIEW_MEMORY, L"Segments");
+        AppendMenuW(windows_menu, MF_STRING, ID_VIEW_SYMBOLS, L"Names\tShift+F4");
+        AppendMenuW(windows_menu, MF_STRING, ID_VIEW_MEMORY, L"Segments\tShift+F7");
         AppendMenuW(windows_menu, MF_STRING, ID_VIEW_PROBLEMS, L"Problems");
-        AppendMenuW(windows_menu, MF_STRING, ID_VIEW_TYPES, L"Local Types");
+        AppendMenuW(windows_menu, MF_STRING, ID_VIEW_TYPES, L"Local Types\tShift+F1");
         AppendMenuW(windows_menu, MF_STRING, ID_VIEW_LLIL, L"Experimental LLIL");
         AppendMenuW(windows_menu, MF_STRING, ID_VIEW_FUNCTIONS, L"Functions\tShift+F3");
         AppendMenuW(windows_menu, MF_STRING, ID_VIEW_DEBUGGER, L"Debugger");
@@ -8784,21 +10130,21 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(plugins), L"Plugins");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(help), L"Help");
         SetMenu(window, menu);
+        g_main_window = window;
         g_tree = CreateWindowExW(WS_EX_CLIENTEDGE, WC_TREEVIEWW, nullptr, WS_CHILD | WS_VISIBLE | TVS_HASLINES | TVS_LINESATROOT | TVS_SHOWSELALWAYS, 0, 0, 0, 0, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TREE)), g_instance, nullptr);
         g_tabs = CreateWindowExW(0, WC_TABCONTROLW, nullptr, WS_CHILD | WS_VISIBLE | TCS_TABS | TCS_OWNERDRAWFIXED, 0, 0, 0, 0, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_TABS)), g_instance, nullptr);
-        const wchar_t* labels[] = {L"Gandon View-A", L"Gandon Text Listing", L"Pseudocode-A", L"XREFs", L"Debugger Win32", L"Hex View-1", L"Local Types", L"Imports", L"Exports", L"Strings", L"Resources", L"Symbols / Debug Info", L"Memory Map", L"Problems / Events", L"Experimental LLIL"};
-        for (const auto* label : labels) { TCITEMW item{TCIF_TEXT, 0, 0, const_cast<wchar_t*>(label), 0, 0, 0}; TabCtrl_InsertItem(g_tabs, TabCtrl_GetItemCount(g_tabs), &item); }
+        rebuild_tab_strip();
         g_view = CreateWindowExW(WS_EX_CLIENTEDGE, L"GandonGraphView", nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL, 0, 0, 0, 0, window, nullptr, g_instance, nullptr);
         g_minimap = CreateWindowExW(WS_EX_CLIENTEDGE, L"GandonMiniMap", nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0, 0, 0, 0, window, nullptr, g_instance, nullptr);
         g_navband = CreateWindowExW(0, L"GandonNavBand", nullptr, WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window, nullptr, g_instance, nullptr);
         SetWindowSubclass(g_tabs, dark_background_subclass, 2, 0);
         SendMessageW(g_tabs, WM_SETFONT, reinterpret_cast<WPARAM>(g_ui_font), FALSE);
-        TabCtrl_SetPadding(g_tabs, 14, 5);
+        TabCtrl_SetPadding(g_tabs, 12, 5);
         TreeView_SetBkColor(g_tree, THEMED_RGB(24, 27, 32)); TreeView_SetTextColor(g_tree, THEMED_RGB(215, 228, 238));
         if (LoadLibraryW(L"Msftedit.dll"))
-            g_editor = CreateWindowExW(WS_EX_CLIENTEDGE, L"RICHEDIT50W", L"Open EXE file from File -> Open EXE file...", WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_NOHIDESEL, 0, 0, 0, 0, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_EDITOR)), g_instance, nullptr);
+            g_editor = CreateWindowExW(WS_EX_CLIENTEDGE, L"RICHEDIT50W", L"Open EXE file from File -> Open Binary (Ctrl+O)...", WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_NOHIDESEL, 0, 0, 0, 0, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_EDITOR)), g_instance, nullptr);
         if (!g_editor)
-            g_editor = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"Open EXE file from File -> Open EXE file...", WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 0, 0, 0, 0, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_EDITOR)), g_instance, nullptr);
+            g_editor = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"Open EXE file from File -> Open Binary (Ctrl+O)...", WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 0, 0, 0, 0, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_EDITOR)), g_instance, nullptr);
         {
             wchar_t editor_class[32] = {};
             GetClassNameW(g_editor, editor_class, 32);
@@ -8809,7 +10155,28 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
                 SendMessageW(g_editor, EM_SETCHARFORMAT, SCF_DEFAULT, reinterpret_cast<LPARAM>(&format));
             }
         }
-        g_output = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"Gandon-PRO ready.\r\nOpen a binary with File -> Open EXE file...\r\n", WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 0, 0, 0, 0, window, nullptr, g_instance, nullptr);
+        SetWindowSubclass(g_editor, [](HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR) -> LRESULT {
+            if (m == WM_LBUTTONDBLCLK && g_database) {
+                const LRESULT r = DefSubclassProc(h, m, w, l);
+                if (active_view_kind() == ViewKind::ViewA) {
+                    if (const auto target = editor_line_target_address(h)) {
+                        navigate_to_address(GetParent(h), *target, 1);
+                        return 0;
+                    }
+                }
+                if (const auto addr = editor_line_address(h)) {
+                    navigate_to_address(GetParent(h), *addr, g_view_a_graph_mode ? 0 : 1);
+                    return 0;
+                }
+                return r;
+            }
+            if (m == WM_KEYDOWN && w == VK_RETURN && g_database) {
+                follow_operand_at_cursor(GetParent(h));
+                return 0;
+            }
+            return DefSubclassProc(h, m, w, l);
+        }, 5, 0);
+        g_output = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"Gandon-PRO ready (IDA Pro 9.5 mode).\r\nOpen a binary with File -> Open Binary (Ctrl+O)...\r\n", WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 0, 0, 0, 0, window, nullptr, g_instance, nullptr);
         SendMessageW(g_output, WM_SETFONT, reinterpret_cast<WPARAM>(g_code_font), TRUE);
         flatten_client_edges();
         if (!g_light_theme) {
@@ -8831,6 +10198,34 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
                 static std::wstring last;
                 const std::wstring text = reinterpret_cast<const wchar_t*>(l);
                 if (!text.empty() && text != last && text != L"Ready") { last = text; py_console_log(L"status: " + text); }
+                if (!g_light_theme) InvalidateRect(h, nullptr, FALSE);
+            }
+            if (!g_light_theme && m == WM_ERASEBKGND) return 1;
+            if (!g_light_theme && m == WM_PAINT) {
+                PAINTSTRUCT ps{}; HDC dc = BeginPaint(h, &ps);
+                RECT rc{}; GetClientRect(h, &rc);
+                HBRUSH bg = CreateSolidBrush(THEMED_RGB(18, 22, 27));
+                FillRect(dc, &rc, bg); DeleteObject(bg);
+                HPEN top_pen = CreatePen(PS_SOLID, 1, THEMED_RGB(52, 64, 74));
+                HGDIOBJ old_pen = SelectObject(dc, top_pen);
+                MoveToEx(dc, 0, 0, nullptr); LineTo(dc, rc.right, 0);
+                HGDIOBJ old_font = SelectObject(dc, g_ui_font);
+                SetBkMode(dc, TRANSPARENT);
+                const int nparts = static_cast<int>(SendMessageW(h, SB_GETPARTS, 0, 0));
+                for (int i = 0; i < nparts; ++i) {
+                    RECT part{};
+                    if (!SendMessageW(h, SB_GETRECT, static_cast<WPARAM>(i), reinterpret_cast<LPARAM>(&part))) continue;
+                    if (i > 0) { MoveToEx(dc, part.left, 3, nullptr); LineTo(dc, part.left, rc.bottom - 3); }
+                    wchar_t buf[512]{};
+                    SendMessageW(h, SB_GETTEXTW, static_cast<WPARAM>(i), reinterpret_cast<LPARAM>(buf));
+                    RECT txt = part; txt.left += 8; txt.right -= 6;
+                    const COLORREF col = (i == 2 && g_mcp_server.is_running()) ? RGB(115, 209, 138) : THEMED_RGB(215, 228, 238);
+                    SetTextColor(dc, col);
+                    DrawTextW(dc, buf, -1, &txt, DT_SINGLELINE | DT_VCENTER | (i > 0 ? DT_CENTER : DT_LEFT) | DT_END_ELLIPSIS | DT_NOPREFIX);
+                }
+                SelectObject(dc, old_font); SelectObject(dc, old_pen); DeleteObject(top_pen);
+                EndPaint(h, &ps);
+                return 0;
             }
             return DefSubclassProc(h, m, w, l);
         }, 91, 0);
@@ -8838,20 +10233,25 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         g_toolbar = CreateWindowExW(0, TOOLBARCLASSNAMEW, nullptr, WS_CHILD | WS_VISIBLE | TBSTYLE_FLAT | TBSTYLE_TOOLTIPS | CCS_NODIVIDER | CCS_NORESIZE, 0, 0, 0, 0, window, nullptr, g_instance, nullptr);
         if (g_toolbar) {
             SendMessageW(g_toolbar, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
-            SendMessageW(g_toolbar, TB_SETMAXTEXTROWS, 0, 0); // tooltips only, no captions under the icons
+            SendMessageW(g_toolbar, TB_SETMAXTEXTROWS, 0, 0);
             SetWindowSubclass(g_toolbar, dark_background_subclass, 1, 0);
             SendMessageW(g_toolbar, TB_SETIMAGELIST, 0, reinterpret_cast<LPARAM>(make_ida_toolbar_images()));
             const TBBUTTON buttons[] = {
-                {0, ID_OPEN, TBSTATE_ENABLED, BTNS_BUTTON, {}, 0, reinterpret_cast<INT_PTR>(L"Open")},
-                {1, ID_SAVE_DB, TBSTATE_ENABLED, BTNS_BUTTON, {}, 0, reinterpret_cast<INT_PTR>(L"Save database")},
+                {0, ID_OPEN, TBSTATE_ENABLED, BTNS_BUTTON, {}, 0, reinterpret_cast<INT_PTR>(L"Open Binary (Ctrl+O)")},
+                {1, ID_SAVE_DB, TBSTATE_ENABLED, BTNS_BUTTON, {}, 0, reinterpret_cast<INT_PTR>(L"Save Database (Ctrl+S)")},
                 {0, 0, TBSTATE_ENABLED, BTNS_SEP, {}, 0, 0},
-                {2, ID_JUMP_BACK, TBSTATE_ENABLED, BTNS_BUTTON, {}, 0, reinterpret_cast<INT_PTR>(L"Jump back (Esc)")},
-                {3, ID_JUMP_FORWARD, TBSTATE_ENABLED, BTNS_BUTTON, {}, 0, reinterpret_cast<INT_PTR>(L"Jump forward (Ctrl+Enter)")},
+                {2, ID_JUMP_BACK, TBSTATE_ENABLED, BTNS_BUTTON, {}, 0, reinterpret_cast<INT_PTR>(L"Jump Back (Esc)")},
+                {3, ID_JUMP_FORWARD, TBSTATE_ENABLED, BTNS_BUTTON, {}, 0, reinterpret_cast<INT_PTR>(L"Jump Forward (Ctrl+Enter)")},
                 {0, 0, TBSTATE_ENABLED, BTNS_SEP, {}, 0, 0},
-                {4, ID_JUMP_ADDR, TBSTATE_ENABLED, BTNS_BUTTON, {}, 0, reinterpret_cast<INT_PTR>(L"Jump to address")},
+                {4, ID_JUMP_ADDR, TBSTATE_ENABLED, BTNS_BUTTON, {}, 0, reinterpret_cast<INT_PTR>(L"Jump to Address (G)")},
+                {7, ID_LIST_XREFS, TBSTATE_ENABLED, BTNS_BUTTON, {}, 0, reinterpret_cast<INT_PTR>(L"Cross-References (X)")},
+                {8, ID_VIEW_FUNCTIONS, TBSTATE_ENABLED, BTNS_BUTTON, {}, 0, reinterpret_cast<INT_PTR>(L"Functions (Shift+F3)")},
+                {9, ID_VIEW_STRINGS, TBSTATE_ENABLED, BTNS_BUTTON, {}, 0, reinterpret_cast<INT_PTR>(L"Strings (Shift+F12)")},
+                {0, 0, TBSTATE_ENABLED, BTNS_SEP, {}, 0, 0},
                 {5, ID_DECOMPILE, TBSTATE_ENABLED, BTNS_BUTTON, {}, 0, reinterpret_cast<INT_PTR>(L"Pseudocode (F5)")},
+                {6, ID_TOGGLE_GRAPH_LIST, TBSTATE_ENABLED, BTNS_BUTTON, {}, 0, reinterpret_cast<INT_PTR>(L"Graph / Text (Space)")},
                 {0, 0, TBSTATE_ENABLED, BTNS_SEP, {}, 0, 0},
-                {6, ID_TOGGLE_GRAPH_LIST, TBSTATE_ENABLED, BTNS_BUTTON, {}, 0, reinterpret_cast<INT_PTR>(L"Graph / text")},
+                {10, ID_RUN, TBSTATE_ENABLED, BTNS_BUTTON, {}, 0, reinterpret_cast<INT_PTR>(L"Start / Continue Debugger (F9)")},
             };
             SendMessageW(g_toolbar, TB_ADDBUTTONSW, static_cast<WPARAM>(sizeof(buttons) / sizeof(buttons[0])), reinterpret_cast<LPARAM>(buttons));
         }
@@ -8859,28 +10259,27 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         set_editor_text();
         SetTimer(window, ID_SESSION_TIMER, 3000, nullptr);
         dock::materialise();
+        mcp_start_server(window);
         return 0;
     }
     case WM_SIZE: {
         RECT client{}; GetClientRect(window, &client); SendMessageW(g_status, WM_SIZE, 0, 0); RECT status_rect{}; GetWindowRect(g_status, &status_rect); const int status_height = status_rect.bottom - status_rect.top; const int width = client.right, height = client.bottom - status_height;
-        const bool dock_minimap = g_minimap_visible && TabCtrl_GetCurSel(g_tabs) == 0;
+        const bool dock_minimap = g_minimap_visible && is_graph_view_active();
         const int minimap_width = dock_minimap ? 230 : 0;
         constexpr int toolbar_height = 28;
         if (g_toolbar) MoveWindow(g_toolbar, 0, 0, width, toolbar_height - 2, TRUE);
         {
-            const int parts[] = {(std::max)(120, width - 200), (std::max)(180, width - 110), -1};
-            SendMessageW(g_status, SB_SETPARTS, 3, reinterpret_cast<LPARAM>(parts));
-            SendMessageW(g_status, SB_SETTEXTW, 1, reinterpret_cast<LPARAM>(L"AU: idle"));
-            SendMessageW(g_status, SB_SETTEXTW, 2, reinterpret_cast<LPARAM>(L"Down"));
+            const int parts[] = {(std::max)(120, width - 310), (std::max)(180, width - 210), (std::max)(240, width - 95), -1};
+            SendMessageW(g_status, SB_SETPARTS, 4, reinterpret_cast<LPARAM>(parts));
+            update_status_bar_panes();
         }
         const RECT central = dock::layout({0, toolbar_height, width, height});
         const int cl = central.left, cr = central.right, cb = central.bottom;
-        MoveWindow(g_tabs, cl + 6, 6 + toolbar_height, cr - cl - 12, 30, TRUE);
-        { RECT last{}; const int n = TabCtrl_GetItemCount(g_tabs); if (n > 0 && TabCtrl_GetItemRect(g_tabs, n - 1, &last)) MoveWindow(g_tabs, cl + 6, 6 + toolbar_height, (std::min<int>)(cr - cl - 12, last.right + 1), 30, TRUE); }
-        constexpr int band_height = 18, content_top = 38 + toolbar_height + band_height + 4;
+        MoveWindow(g_tabs, cl + 6, 6 + toolbar_height, cr - cl - 12, 28, TRUE);
+        constexpr int band_height = 18, content_top = 36 + toolbar_height + band_height + 4;
         const int view_width_docked = (std::max)(120, cr - cl - 12 - minimap_width);
         const int content_height = (std::max)(40, cb - content_top - 6);
-        MoveWindow(g_navband, cl + 6, 38 + toolbar_height, cr - cl - 12, band_height, TRUE);
+        MoveWindow(g_navband, cl + 6, 36 + toolbar_height, cr - cl - 12, band_height, TRUE);
         InvalidateRect(g_navband, nullptr, FALSE);
         MoveWindow(g_view, cl + 6, content_top, view_width_docked, content_height, TRUE);
         MoveWindow(g_editor, cl + 6, content_top, cr - cl - 12, content_height, TRUE);
@@ -8960,13 +10359,26 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         else if (id == ID_TOGGLE_BOOKMARK) toggle_bookmark(window);
         else if (id == ID_NEXT_BOOKMARK) next_bookmark(window);
         else if (id == ID_LIST_XREFS) list_xrefs(window);
+        else if (id == ID_XREFS_FROM) show_xrefs_popup(window, true);
+        else if (id == ID_BOOKMARKS_POPUP) show_bookmarks_popup(window);
+        else if (id == ID_JUMP_SEGMENT) show_segments_popup(window);
+        else if (id == ID_SEARCH_BYTES) search_signature(window);
+        else if (id == ID_FOLLOW_CURSOR_ENTER) follow_operand_at_cursor(window);
+        else if (id == ID_SWITCH_PSEUDO_DISASM) {
+            if (active_view_kind() == ViewKind::Pseudocode) {
+                select_view(window, g_view_a_graph_mode ? 0 : 1);
+            } else {
+                if (g_database) g_pseudocode = pseudocode_text_at(*g_database, g_current_address ? g_current_address : g_database->image().entry_point);
+                select_view(window, 2);
+            }
+        }
         else if (id == ID_FIND_FUNCTION) find_function(window);
         else if (id == ID_SEARCH_PROCESS_MEMORY) search_process_memory(window);
         else if (id == ID_PY_CONSOLE) python_console(window);
         else if (id == ID_RENAME_LABEL) rename_current_label(window);
         else if (id == ID_ADD_COMMENT) add_current_comment(window);
         else if (id == ID_ASSIGN_TYPE) assign_current_type(window);
-        else if (id == ID_CONTEXT_FOLLOW) { if (g_database && g_current_address) navigate_to_address(window, g_current_address, 1); }
+        else if (id == ID_CONTEXT_FOLLOW) { if (g_database && g_current_address) navigate_to_address(window, g_current_address, is_graph_view_active() ? 0 : 1); }
         else if (id == ID_CONTEXT_COPY) SendMessageW(g_editor, WM_COPY, 0, 0);
         else if (id == ID_CALL_GRAPH) { if (g_database) { g_listing = call_graph_text(*g_database, g_current_address); select_view(window, 1); } }
         else if (id == ID_PATHFINDER) find_call_path(window);
@@ -9016,43 +10428,49 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         else if (id == ID_HIDDEN_SYMBOLS) show_hidden_symbols(window);
         else if (id == ID_RESTORE_HIDDEN) restore_all_hidden_symbols(window);
         else if (id == ID_HIDE_FUNCTION) hide_current_function(window);
-        else if (id == ID_HIDE_IMPORT) {
+        if (id == ID_HIDE_IMPORT) {
             if (const auto record = selected_tree_import()) hide_selected_import(window, record->iat_va);
+            return 0;
         }
-        else if (id == ID_CONTEXT_FOLLOW_TARGET) { if (g_database) { const auto target = editor_line_target_address(g_editor); if (target) navigate_to_address(window, *target, 1); } }
-        else if (id == ID_EXIT) SendMessageW(window, WM_CLOSE, 0, 0);
-        else if (id == ID_VIEW_GRAPH) select_view(window, 0);
-        else if (id == ID_VIEW_LISTING) select_view(window, 1);
-        else if (id == ID_VIEW_PSEUDO) select_view(window, 2);
-        else if (id == ID_VIEW_DEBUGGER) select_view(window, 4);
-        else if (id == ID_VIEW_HEX) select_view(window, 5);
-        else if (id == ID_VIEW_TYPES) select_view(window, 6);
-        else if (id == ID_VIEW_IMPORTS) select_view(window, 7);
-        else if (id == ID_VIEW_EXPORTS) select_view(window, 8);
-        else if (id == ID_VIEW_STRINGS) select_view(window, 9);
-        else if (id == ID_VIEW_RESOURCES) select_view(window, 10);
-        else if (id == ID_VIEW_SYMBOLS) select_view(window, 11);
-        else if (id == ID_VIEW_MEMORY) select_view(window, 12);
-        else if (id == ID_VIEW_PROBLEMS) select_view(window, 13);
-        else if (id == ID_VIEW_LLIL) select_view(window, 14);
-        else if (id == ID_VIEW_FUNCTIONS) functions_window(window);
-        else if (id == ID_DIFF_FUNCTIONS) diff_with_binary(window);
-        else if (id == ID_STRUCT_OFFSET) apply_struct_offset(window);
-        else if (id == ID_ENUM_OPERAND) apply_enum_operand(window);
-        else if (id == ID_SET_PROTOTYPE) set_function_prototype(window);
-        else if (id == ID_TYPES_EDITOR) types_editor_window(window);
-        else if (id == ID_TOGGLE_GRAPH_LIST) toggle_graph_listing(window);
-        else if (id == ID_FIT_GRAPH) fit_graph(window);
-        else if (id == ID_TOGGLE_MINIMAP) toggle_minimap(window);
-        else if (id == ID_DECOMPILE) { if (g_database) g_pseudocode = pseudocode_text_at(*g_database, g_current_address ? g_current_address : g_database->image().entry_point); select_view(window, 2); }
-        else if (id == ID_STEP_INTO) step_debugger(window, false);
-        else if (id == ID_STEP_OVER) step_debugger(window, true);
-        else if (id == ID_BP_MANAGER) show_breakpoint_manager(window);
-        else if (id == ID_HW_BP) toggle_hardware_breakpoint(window);
-        else if (id == ID_WATCH_LOCALS) show_watch_locals(window);
-        else if (id == ID_CALL_STACK) show_call_stack(window);
-        else if (id == ID_COND_BP) configure_breakpoint_condition(window);
-        else if (id == ID_CONFIG_BP) configure_breakpoint(window);
+        if (id == ID_CONTEXT_FOLLOW_TARGET) { if (g_database) { const auto target = editor_line_target_address(g_editor); if (target) navigate_to_address(window, *target, 1); } return 0; }
+        if (id == ID_EXIT) { SendMessageW(window, WM_CLOSE, 0, 0); return 0; }
+        if (id == ID_VIEW_GRAPH) { select_view(window, 0); return 0; }
+        if (id == ID_VIEW_LISTING) { select_view(window, 1); return 0; }
+        if (id == ID_VIEW_PSEUDO) { if (g_database) g_pseudocode = pseudocode_text_at(*g_database, g_current_address ? g_current_address : g_database->image().entry_point); select_view(window, 2); return 0; }
+        if (id == ID_VIEW_DEBUGGER) { select_view(window, 4); return 0; }
+        if (id == ID_VIEW_HEX) { select_view(window, 5); return 0; }
+        if (id == ID_VIEW_TYPES) { select_view(window, 6); return 0; }
+        if (id == ID_VIEW_IMPORTS) { select_view(window, 7); return 0; }
+        if (id == ID_VIEW_EXPORTS) { select_view(window, 8); return 0; }
+        if (id == ID_VIEW_STRINGS) { select_view(window, 9); return 0; }
+        if (id == ID_VIEW_RESOURCES) { select_view(window, 10); return 0; }
+        if (id == ID_VIEW_SYMBOLS) { select_view(window, 11); return 0; }
+        if (id == ID_VIEW_MEMORY) { select_view(window, 12); return 0; }
+        if (id == ID_VIEW_PROBLEMS) { select_view(window, 13); return 0; }
+        if (id == ID_VIEW_LLIL) { select_view(window, 14); return 0; }
+        if (id == ID_VIEW_FUNCTIONS) { functions_window(window); return 0; }
+        if (id == ID_DIFF_FUNCTIONS) { diff_with_binary(window); return 0; }
+        if (id == ID_STRUCT_OFFSET) { apply_struct_offset(window); return 0; }
+        if (id == ID_ENUM_OPERAND) { apply_enum_operand(window); return 0; }
+        if (id == ID_SET_PROTOTYPE) { set_function_prototype(window); return 0; }
+        if (id == ID_TYPES_EDITOR) { types_editor_window(window); return 0; }
+        if (id == ID_TOGGLE_GRAPH_LIST) { toggle_graph_listing(window); return 0; }
+        if (id == ID_FIT_GRAPH) { fit_graph(window); return 0; }
+        if (id == ID_TOGGLE_MINIMAP) { toggle_minimap(window); return 0; }
+        if (id == ID_DECOMPILE) { if (g_database) g_pseudocode = pseudocode_text_at(*g_database, g_current_address ? g_current_address : g_database->image().entry_point); select_view(window, 2); return 0; }
+        if (id == ID_STEP_INTO) { step_debugger(window, false); return 0; }
+        if (id == ID_STEP_OVER) { step_debugger(window, true); return 0; }
+        if (id == ID_BP_MANAGER) { show_breakpoint_manager(window); return 0; }
+        if (id == ID_HW_BP) { toggle_hardware_breakpoint(window); return 0; }
+        if (id == ID_WATCH_LOCALS) { show_watch_locals(window); return 0; }
+        if (id == ID_CALL_STACK) { show_call_stack(window); return 0; }
+        if (id == ID_COND_BP) { configure_breakpoint_condition(window); return 0; }
+        if (id == ID_CONFIG_BP) { configure_breakpoint(window); return 0; }
+        if (id == ID_MCP_TOGGLE) { mcp_toggle_server(window); return 0; }
+        if (id == ID_MCP_CONFIG) { mcp_configure_dialog(window); return 0; }
+        if (id == ID_MCP_COPY_URL) { mcp_copy_url(window); return 0; }
+        if (id == ID_MCP_COPY_CONFIG) { mcp_copy_client_config(window); return 0; }
+        if (id == ID_MCP_STATUS) { mcp_show_status(window); return 0; }
         return 0;
     }
     case WM_CONTEXTMENU: {
@@ -9079,17 +10497,29 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         if (reinterpret_cast<HWND>(wparam) != g_editor) break;
         const auto address = editor_line_address(g_editor); if (address) { g_current_address = *address; SetWindowTextW(g_status, (L"Selected instruction: 0x" + [&] { std::wostringstream value; value << std::hex << std::uppercase << *address; return value.str(); }()).c_str()); }
         HMENU context = CreatePopupMenu();
-        AppendMenuW(context, MF_STRING, ID_CONTEXT_COPY, L"Copy");
+        AppendMenuW(context, MF_STRING, ID_CONTEXT_COPY, L"Copy\tCtrl+C");
         if (address) {
             AppendMenuW(context, MF_SEPARATOR, 0, nullptr);
-            AppendMenuW(context, MF_STRING, ID_CONTEXT_FOLLOW, L"Follow Address");
-            if (TabCtrl_GetCurSel(g_tabs) == 3 && editor_line_target_address(g_editor)) AppendMenuW(context, MF_STRING, ID_CONTEXT_FOLLOW_TARGET, L"Follow XREF Target");
-            AppendMenuW(context, MF_STRING, ID_EDIT_INSTRUCTION, L"Patch Instruction...");
+            AppendMenuW(context, MF_STRING, ID_FOLLOW_CURSOR_ENTER, L"Jump to Operand / Target\tEnter");
+            if (editor_line_target_address(g_editor)) AppendMenuW(context, MF_STRING, ID_CONTEXT_FOLLOW_TARGET, L"Follow Referenced Address");
+            AppendMenuW(context, MF_STRING, ID_CONTEXT_FOLLOW, L"Follow Line Address");
+            AppendMenuW(context, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(context, MF_STRING, ID_LIST_XREFS, L"Jump to Xrefs to Operand...\tX");
+            AppendMenuW(context, MF_STRING, ID_XREFS_FROM, L"Jump to Xrefs from...\tCtrl+J");
+            AppendMenuW(context, MF_STRING, ID_DECOMPILE, L"Decompile Function (Pseudocode)\tF5");
+            AppendMenuW(context, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(context, MF_STRING, ID_RENAME_LABEL, L"Rename...\tN");
+            AppendMenuW(context, MF_STRING, ID_ADD_COMMENT, L"Add Comment...\t;");
+            AppendMenuW(context, MF_STRING, ID_ASSIGN_TYPE, L"Set Item Type...\tY");
+            AppendMenuW(context, MF_STRING, ID_STRUCT_OFFSET, L"Structure Offset...\tT");
+            AppendMenuW(context, MF_STRING, ID_ENUM_OPERAND, L"Enum Member...\tM");
+            AppendMenuW(context, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(context, MF_STRING, ID_TOGGLE_BP, L"Toggle Breakpoint\tF2");
+            AppendMenuW(context, MF_STRING, ID_TOGGLE_BOOKMARK, L"Mark Position (Bookmark)\tAlt+M");
+            AppendMenuW(context, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(context, MF_STRING, ID_EDIT_INSTRUCTION, L"Patch Instruction...\tCtrl+E");
             AppendMenuW(context, MF_POPUP, reinterpret_cast<UINT_PTR>(build_patch_submenu()), L"Patch");
             AppendMenuW(context, MF_STRING, ID_NOP_BLOCK, L"Patch Function (NOP)");
-            AppendMenuW(context, MF_STRING, ID_RENAME_LABEL, L"Rename Label");
-            AppendMenuW(context, MF_STRING, ID_ADD_COMMENT, L"Add Comment");
-            AppendMenuW(context, MF_STRING, ID_ASSIGN_TYPE, L"Assign Type...");
             AppendMenuW(context, MF_STRING, ID_HIDE_FUNCTION, L"Hide Function from Analysis");
             HMENU colors = CreatePopupMenu();
             AppendMenuW(colors, MF_STRING, ID_COLOR_DEFAULT, L"Default Dark");
@@ -9104,9 +10534,9 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     case WM_DEBUG_STATUS:
         if (wparam == 1) {
             wchar_t text[96]{}; swprintf_s(text, L"Breakpoint / single-step at 0x%llX", static_cast<unsigned long long>(lparam)); SetWindowTextW(g_status, text);
-        } else if (wparam == 2) { SetWindowTextW(g_status, L"Debug process initialized."); if (g_database && TabCtrl_GetCurSel(g_tabs) == 12) set_editor_text(); }
+        } else if (wparam == 2) { SetWindowTextW(g_status, L"Debug process initialized."); if (g_database && active_legacy_tab() == 12) set_editor_text(); }
         else if (wparam == 3) { wchar_t text[64]{}; swprintf_s(text, L"Debug process exited: %llu", static_cast<unsigned long long>(lparam)); SetWindowTextW(g_status, text); }
-        else if (wparam == 4) { SetWindowTextW(g_status, L"Debug process stopped."); if (g_database && TabCtrl_GetCurSel(g_tabs) == 12) set_editor_text(); }
+        else if (wparam == 4) { SetWindowTextW(g_status, L"Debug process stopped."); if (g_database && active_legacy_tab() == 12) set_editor_text(); }
         else if (wparam == 5) { wchar_t text[96]{}; swprintf_s(text, L"Single-step at 0x%llX", static_cast<unsigned long long>(lparam)); SetWindowTextW(g_status, text); }
         else if (wparam == 6) { SetWindowTextW(g_status, g_stealth_applied.load() ? L"Anti-debug bypass applied." : L"Anti-debug bypass was not applied."); }
         else if (wparam == 7) {
@@ -9125,7 +10555,8 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
             wchar_t text[96]{}; swprintf_s(text, L"Debug process started. PID %llu", static_cast<unsigned long long>(lparam));
             SetWindowTextW(g_status, text);
         }
-        if (TabCtrl_GetCurSel(g_tabs) == 4) set_editor_text();
+        if (active_legacy_tab() == 4) set_editor_text();
+        update_status_bar_panes();
         return 0;
     case WM_APPCOMMAND: {
         // Mouse back/forward (X1/X2) buttons bubble up here from any child view.
@@ -9136,8 +10567,11 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     }
     case WM_KEYDOWN:
         if (wparam == VK_SPACE) { toggle_graph_listing(window); return 0; }
-        if (wparam == VK_HOME && TabCtrl_GetCurSel(g_tabs) == 0) { fit_graph(window); return 0; }
-        if (wparam == VK_F5) { refresh_views(window); return 0; }
+        if (wparam == VK_HOME && is_graph_view_active()) { fit_graph(window); return 0; }
+        if (wparam == VK_F5) {
+            SendMessageW(window, WM_COMMAND, (GetKeyState(VK_CONTROL) & 0x8000) ? ID_REFRESH : ID_DECOMPILE, 0);
+            return 0;
+        }
         if (wparam == VK_F6) { pause_debugger(window); return 0; }
         if (wparam == VK_F2) { toggle_breakpoint(window); return 0; }
         if (wparam == VK_F9) { start_debugger(window); return 0; }
@@ -9212,11 +10646,12 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
             }
         }
         if (header->idFrom == ID_TABS && header->code == TCN_SELCHANGE) {
-            const int tab = TabCtrl_GetCurSel(g_tabs);
-            if (tab == 0) rebuild_graph_model();
+            if (is_graph_view_active()) rebuild_graph_model();
+            g_session_tab = active_legacy_tab();
             set_editor_text();
             update_graph_scrollbars(g_view);
             invalidate_minimap();
+            update_status_bar_panes();
         }
         if (header->idFrom == ID_TREE && header->code == TVN_SELCHANGEDW && g_database) {
             const auto* change = reinterpret_cast<const NMTREEVIEWW*>(lparam);
@@ -9225,17 +10660,13 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
                 if (g_string_addresses.contains(address)) {
                     navigate_to_address(window, address, 5);
                 } else {
-                    // Keep View-A active while browsing the Functions tree.  The
-                    // old double-click-only handler always forced Text Listing,
-                    // leaving the graph on the previously selected function.
-                    const int current_tab = TabCtrl_GetCurSel(g_tabs);
-                    const int target_tab = current_tab == 0 ? 0 : (current_tab == 2 ? 2 : 1);
+                    const ViewKind current_kind = active_view_kind();
+                    const int target_tab = (current_kind == ViewKind::ViewA)
+                        ? (g_view_a_graph_mode ? 0 : 1)
+                        : (current_kind == ViewKind::Pseudocode ? 2 : 1);
                     navigate_to_address(window, address, target_tab);
                 }
-                std::wostringstream status;
-                status << L"Selected: 0x" << std::hex << std::uppercase << address;
-                const auto status_text = status.str();
-                SendMessageW(g_status, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(status_text.c_str()));
+                update_status_bar_panes();
             }
         }
         if (header->idFrom == ID_TREE && header->code == NM_CUSTOMDRAW) {
@@ -9250,111 +10681,15 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         }
         return 0;
     }
-    case WM_LBUTTONDOWN: {
-        if (TabCtrl_GetCurSel(g_tabs) == 0 && g_database) {
-            const int mouse_x = static_cast<int>(static_cast<short>(LOWORD(lparam)));
-            const int mouse_y = static_cast<int>(static_cast<short>(HIWORD(lparam)));
-            const int left = 300, box_width = 300, box_height = 82, gap = 55;
-            const int column = (mouse_x - (left + 24)) / (box_width + gap);
-            const int row = (mouse_y - 72) / (box_height + 40);
-            if (column >= 0 && column < 3 && row >= 0) {
-                const auto index = static_cast<std::size_t>(row * 3 + column);
-                if (index < g_database->functions().size()) {
-                    navigate_to_address(window, g_database->functions()[index].start, 1);
-                }
-            }
-        }
+    case WM_LBUTTONDOWN:
         return 0;
-    }
     case WM_PAINT: {
         PAINTSTRUCT paint{};
         HDC dc = BeginPaint(window, &paint);
-        RECT client{}; GetClientRect(window, &client); RECT canvas{300, 38, client.right, client.bottom - 24}; FillRect(dc, &canvas, g_background);
-        // View-A is a real child canvas (g_view/graph_proc).  Do not paint the
-        // old function-card preview underneath it: the two renderers used to
-        // compete for the same tab and made the UI look like a stale preview.
-        if (TabCtrl_GetCurSel(g_tabs) == 0) {
-            EndPaint(window, &paint);
-            return 0;
-        }
-        if (TabCtrl_GetCurSel(g_tabs) == 0) {
-            HGDIOBJ old_font = SelectObject(dc, g_code_font);
-            SetBkMode(dc, TRANSPARENT); SetTextColor(dc, THEMED_RGB(170, 239, 207));
-            const int left = 300;
-            if (!g_database) {
-                TextOutW(dc, left + 24, 72, L"Gandon View-A", 13);
-                TextOutW(dc, left + 24, 102, L"Open EXE file to build the control-flow graph.", 46);
-            } else {
-                const int box_width = 300, box_height = 82, gap = 55;
-                const auto count = (std::min<std::size_t>)(g_database->functions().size(), 12);
-                for (std::size_t i = 0; i < count; ++i) {
-                    const int col = static_cast<int>(i % 3), row = static_cast<int>(i / 3);
-                    const int x = left + 24 + col * (box_width + gap), y = 72 + row * (box_height + 40);
-                    RECT box{x, y, x + box_width, y + box_height};
-                    HBRUSH fill = CreateSolidBrush(THEMED_RGB(32, 39, 47)); FillRect(dc, &box, fill); DeleteObject(fill);
-                    HPEN pen = CreatePen(PS_SOLID, 1, THEMED_RGB(62, 78, 91)); HGDIOBJ old_pen = SelectObject(dc, pen); HGDIOBJ old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH)); Rectangle(dc, box.left, box.top, box.right, box.bottom); SelectObject(dc, old_brush); SelectObject(dc, old_pen); DeleteObject(pen);
-                    const auto& function = g_database->functions()[i]; auto name = g_custom_labels.contains(function.start) ? g_custom_labels[function.start] : wide(function.name); TextOutW(dc, x + 12, y + 12, name.c_str(), static_cast<int>(name.size()));
-                    wchar_t address[40]{}; swprintf_s(address, L"0x%llX", static_cast<unsigned long long>(function.start)); SetTextColor(dc, THEMED_RGB(125, 191, 231)); TextOutW(dc, x + 12, y + 40, address, static_cast<int>(wcslen(address))); SetTextColor(dc, THEMED_RGB(170, 239, 207));
-                }
-                // Draw only relationships discovered by the analyzer. The old preview
-                // connected every neighboring card, which made View-A look populated but
-                // unrelated to the actual binary.
-                auto visible_function = [&](std::uint64_t address) -> int {
-                    for (std::size_t n = 0; n < count; ++n)
-                        if (g_database->functions()[n].start == address) return static_cast<int>(n);
-                    return -1;
-                };
-                for (const auto& xref : g_database->xrefs()) {
-                    int source = -1, target = visible_function(xref.to);
-                    for (std::size_t n = 0; n < count; ++n) {
-                        const auto start = g_database->functions()[n].start;
-                        const auto next = n + 1 < g_database->functions().size() ? g_database->functions()[n + 1].start : UINT64_MAX;
-                        if (xref.from >= start && xref.from < next) { source = static_cast<int>(n); break; }
-                    }
-                    if (source < 0 || target < 0 || source == target) continue;
-                    const int sx = left + 24 + (source % 3) * (box_width + gap) + box_width;
-                    const int sy = 72 + (source / 3) * (box_height + 40) + box_height / 2;
-                    const int tx = left + 24 + (target % 3) * (box_width + gap);
-                    const int ty = 72 + (target / 3) * (box_height + 40) + box_height / 2;
-                    HPEN edge = CreatePen(PS_SOLID, 2, xref.kind == "call" ? THEMED_RGB(54, 157, 220) : THEMED_RGB(231, 76, 60));
-                    HGDIOBJ old_edge = SelectObject(dc, edge);
-                    MoveToEx(dc, sx, sy, nullptr);
-                    if (sy == ty) {
-                        LineTo(dc, tx, ty);
-                    } else {
-                        const int bend = (sx + tx) / 2;
-                        LineTo(dc, bend, sy); LineTo(dc, bend, ty); LineTo(dc, tx, ty);
-                    }
-                    const int direction = tx >= sx ? 1 : -1;
-                    MoveToEx(dc, tx, ty, nullptr); LineTo(dc, tx - direction * 9, ty - 5); MoveToEx(dc, tx, ty, nullptr); LineTo(dc, tx - direction * 9, ty + 5);
-                    SelectObject(dc, old_edge); DeleteObject(edge);
-                }
-                // Restore node surfaces after drawing edges so connectors stay behind
-                // the blocks, as they do in an interactive graph view.
-                for (std::size_t i = 0; i < count; ++i) {
-                    const int col = static_cast<int>(i % 3), row = static_cast<int>(i / 3);
-                    const int x = left + 24 + col * (box_width + gap), y = 72 + row * (box_height + 40);
-                    RECT box{x, y, x + box_width, y + box_height};
-                    HBRUSH fill = CreateSolidBrush(THEMED_RGB(32, 39, 47)); FillRect(dc, &box, fill); DeleteObject(fill);
-                    HPEN pen = CreatePen(PS_SOLID, 1, THEMED_RGB(62, 78, 91)); HGDIOBJ old_pen = SelectObject(dc, pen); HGDIOBJ old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH)); Rectangle(dc, box.left, box.top, box.right, box.bottom); SelectObject(dc, old_brush); SelectObject(dc, old_pen); DeleteObject(pen);
-                    const auto& function = g_database->functions()[i];
-                    auto name = g_custom_labels.contains(function.start) ? g_custom_labels[function.start] : wide(function.name); SetTextColor(dc, THEMED_RGB(170, 239, 207)); TextOutW(dc, x + 12, y + 12, name.c_str(), static_cast<int>(name.size()));
-                    wchar_t address[40]{}; swprintf_s(address, L"0x%llX", static_cast<unsigned long long>(function.start)); SetTextColor(dc, THEMED_RGB(125, 191, 231)); TextOutW(dc, x + 12, y + 40, address, static_cast<int>(wcslen(address)));
-                    if (g_custom_comments.contains(function.start) && !g_custom_comments[function.start].empty()) { SetTextColor(dc, THEMED_RGB(180, 180, 180)); TextOutW(dc, x + 12, y + 62, g_custom_comments[function.start].c_str(), static_cast<int>(g_custom_comments[function.start].size())); }
-                }
-                RECT mini{client.right - 225, client.bottom - 185, client.right - 24, client.bottom - 24};
-                HBRUSH mini_fill = CreateSolidBrush(THEMED_RGB(18, 29, 38)); FillRect(dc, &mini, mini_fill); DeleteObject(mini_fill);
-                HPEN mini_pen = CreatePen(PS_SOLID, 1, THEMED_RGB(62, 78, 91)); HGDIOBJ old_mini_pen = SelectObject(dc, mini_pen); HGDIOBJ old_mini_brush = SelectObject(dc, GetStockObject(NULL_BRUSH)); Rectangle(dc, mini.left, mini.top, mini.right, mini.bottom); SelectObject(dc, old_mini_brush); SelectObject(dc, old_mini_pen); DeleteObject(mini_pen);
-                for (std::size_t i = 0; i < count; ++i) {
-                    const int mx = mini.left + 10 + static_cast<int>((i % 3) * 58);
-                    const int my = mini.top + 10 + static_cast<int>((i / 3) * 24);
-                    RECT dot{mx, my, mx + 40, my + 11};
-                    HBRUSH dot_fill = CreateSolidBrush(i == 0 ? THEMED_RGB(43, 104, 139) : THEMED_RGB(48, 48, 52)); FillRect(dc, &dot, dot_fill); DeleteObject(dot_fill);
-                }
-            }
-            SelectObject(dc, old_font);
-        }
-        EndPaint(window, &paint); return 0;
+        RECT client{}; GetClientRect(window, &client);
+        FillRect(dc, &client, g_background);
+        EndPaint(window, &paint);
+        return 0;
     }
     case WM_ERASEBKGND: { RECT rect{}; GetClientRect(window, &rect); FillRect(reinterpret_cast<HDC>(wparam), &rect, g_background); return 1; }
     case WM_CLOSE: {
@@ -9379,6 +10714,15 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         if (g_native_plugin_host) g_native_plugin_host->unload_all();
         g_native_plugin_actions.clear();
         dock::save();
+        g_ui_shutting_down.store(true);
+        g_mcp_server.stop();
+        MSG pending{};
+        while (PeekMessageW(&pending, window, WM_RUN_ON_UI, WM_RUN_ON_UI, PM_REMOVE)) {
+            if (pending.wParam == 1) {
+                std::unique_ptr<std::shared_ptr<UiCall>> call(reinterpret_cast<std::shared_ptr<UiCall>*>(pending.lParam));
+                if (call && *call && (*call)->event) SetEvent((*call)->event);
+            }
+        }
         DestroyWindow(window); return 0;
     }
     case WM_DESTROY: KillTimer(window, ID_SESSION_TIMER); PostQuitMessage(0); return 0;
@@ -9396,12 +10740,16 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         return 0;
     }
     case WM_RUN_ON_UI: {
-        // A plugin's background thread (e.g. the MCP server plugin) marshals a
-        // job onto the UI thread this way: SendMessageW blocks the caller until
-        // this handler returns, so the job can safely touch g_database and every
-        // other UI-thread-owned global without its own locking.
+        if (wparam == 1) {
+            std::unique_ptr<std::shared_ptr<UiCall>> call(reinterpret_cast<std::shared_ptr<UiCall>*>(lparam));
+            if (call && *call) {
+                if ((*call)->job && !g_ui_shutting_down.load()) (*call)->job();
+                if ((*call)->event) SetEvent((*call)->event);
+            }
+            return 0;
+        }
         auto* job = reinterpret_cast<std::function<void()>*>(lparam);
-        if (job && *job) (*job)();
+        if (job && *job && !g_ui_shutting_down.load()) (*job)();
         return 0;
     }
     }
@@ -9419,8 +10767,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show_
     if (const auto flag = raw_command_line.find(L"--light"); flag != std::wstring::npos) {
         g_light_theme = true;
         raw_command_line.erase(flag, 7);
-        command_line = raw_command_line.data();
     }
+    bool skip_driver_prompt = false;
+    if (const auto flag = raw_command_line.find(L"--no-driver-prompt"); flag != std::wstring::npos) {
+        skip_driver_prompt = true;
+        raw_command_line.erase(flag, 18);
+    }
+    command_line = raw_command_line.data();
     g_instance = instance; enable_dark_popup_menus(); INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_TREEVIEW_CLASSES | ICC_TAB_CLASSES | ICC_BAR_CLASSES}; InitCommonControlsEx(&controls);
     g_background = CreateSolidBrush(THEMED_RGB(30, 34, 40)); g_panel = CreateSolidBrush(THEMED_RGB(24, 27, 32));
     g_ui_font = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
@@ -9434,7 +10787,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show_
     WNDCLASSW graph_class{}; graph_class.hInstance = instance; graph_class.lpfnWndProc = graph_proc; graph_class.lpszClassName = L"GandonGraphView"; graph_class.hCursor = LoadCursorW(nullptr, IDC_ARROW); graph_class.hbrBackground = g_panel; graph_class.style = CS_DBLCLKS; RegisterClassW(&graph_class);
     WNDCLASSW navband_class{}; navband_class.hInstance = instance; navband_class.lpfnWndProc = navband_proc; navband_class.lpszClassName = L"GandonNavBand"; navband_class.hCursor = LoadCursorW(nullptr, IDC_HAND); RegisterClassW(&navband_class);
     WNDCLASSW minimap_class{}; minimap_class.hInstance = instance; minimap_class.lpfnWndProc = minimap_proc; minimap_class.lpszClassName = L"GandonMiniMap"; minimap_class.hCursor = LoadCursorW(nullptr, IDC_CROSS); minimap_class.hbrBackground = g_panel; RegisterClassW(&minimap_class);
-    HWND window = CreateWindowExW(0, class_name, L"Gandon-PRO - Native Disassembler", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, CW_USEDEFAULT, CW_USEDEFAULT, 1400, 850, nullptr, nullptr, instance, nullptr); if (!window) return 1;
+    HWND window = CreateWindowExW(0, class_name, L"Gandon-PRO 9.5 - Native Disassembler", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, CW_USEDEFAULT, CW_USEDEFAULT, 1400, 850, nullptr, nullptr, instance, nullptr); if (!window) return 1;
     g_main_window = window;
     if (g_small_icon) SendMessageW(window, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(g_small_icon));
     const BOOL dark = g_light_theme ? FALSE : TRUE;
@@ -9442,9 +10795,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show_
     const COLORREF caption = THEMED_RGB(30, 34, 40);
     DwmSetWindowAttribute(window, 35, &caption, sizeof(caption));
     ShowWindow(window, show_command); UpdateWindow(window);
-    g_live_kernel = gandon::offer_memory_driver_setup(window);
+    g_live_kernel = skip_driver_prompt ? false : gandon::offer_memory_driver_setup(window);
     CheckMenuItem(GetMenu(window), ID_KERNEL_BACKEND, MF_BYCOMMAND | (g_live_kernel ? MF_CHECKED : MF_UNCHECKED));
     SetWindowTextW(g_status, g_live_kernel ? L"Kernel memory reader connected." : L"Using ReadProcessMemory; driver is optional.");
+    update_status_bar_panes();
     if (command_line && *command_line) {
         std::wstring argument(command_line);
         const auto first = argument.find_first_not_of(L" \t");
@@ -9459,36 +10813,72 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command_line, int show_
         {FVIRTKEY | FCONTROL, 'L', ID_LOAD_DB},
         {FVIRTKEY | FCONTROL | FALT, 'P', ID_APPLY_PATCHES},
         {FVIRTKEY | FCONTROL, 'F', ID_SEARCH},
+        {FVIRTKEY | FALT, 'T', ID_SEARCH},
+        {FVIRTKEY | FALT, 'B', ID_SEARCH_BYTES},
+        {FVIRTKEY | FCONTROL | FSHIFT, 'F', ID_SEARCH_SIGNATURE},
+        {FVIRTKEY, 'G', ID_JUMP_ADDR},
         {FVIRTKEY | FCONTROL, 'G', ID_JUMP_ADDR},
+        {FVIRTKEY | FCONTROL, 'P', ID_FIND_FUNCTION},
         {FVIRTKEY | FCONTROL | FSHIFT, 'G', ID_FIND_FUNCTION},
+        {FVIRTKEY, 'X', ID_LIST_XREFS},
+        {FVIRTKEY | FCONTROL, 'X', ID_LIST_XREFS},
+        {FVIRTKEY | FCONTROL, 'J', ID_XREFS_FROM},
+        {FVIRTKEY | FALT, 'M', ID_TOGGLE_BOOKMARK},
+        {FVIRTKEY | FCONTROL, 'M', ID_BOOKMARKS_POPUP},
+        {FVIRTKEY | FCONTROL | FALT, 'S', ID_JUMP_SEGMENT},
         {FVIRTKEY | FCONTROL, 'E', ID_EDIT_INSTRUCTION},
         {FVIRTKEY, VK_OEM_1, ID_ADD_COMMENT},
         {FVIRTKEY, 'N', ID_RENAME_LABEL},
         {FVIRTKEY | FCONTROL, 'Z', ID_UNDO_PATCH},
         {FVIRTKEY | FCONTROL, 'Y', ID_REDO_PATCH},
         {FVIRTKEY | FCONTROL, 'B', ID_SIGMAKER},
-        {FVIRTKEY | FCONTROL | FSHIFT, 'F', ID_SEARCH_SIGNATURE},
         {FVIRTKEY, VK_F2, ID_TOGGLE_BP},
-        {FVIRTKEY, VK_F5, ID_REFRESH},
+        {FVIRTKEY, VK_F5, ID_DECOMPILE},
+        {FVIRTKEY | FCONTROL, VK_F5, ID_REFRESH},
         {FVIRTKEY, VK_F6, ID_PAUSE},
         {FVIRTKEY, VK_F7, ID_STEP_INTO},
         {FVIRTKEY, VK_F8, ID_STEP_OVER},
         {FVIRTKEY, VK_F9, ID_RUN},
+        {FVIRTKEY, VK_TAB, ID_SWITCH_PSEUDO_DISASM},
         {FVIRTKEY, VK_HOME, ID_FIT_GRAPH},
         {FVIRTKEY, VK_SPACE, ID_TOGGLE_GRAPH_LIST},
         {FVIRTKEY, VK_ESCAPE, ID_JUMP_BACK},
         {FVIRTKEY | FCONTROL, VK_RETURN, ID_JUMP_FORWARD},
-        {FVIRTKEY | FSHIFT, VK_F12, ID_VIEW_STRINGS},
+        {FVIRTKEY | FSHIFT, VK_F1, ID_TYPES_EDITOR},
         {FVIRTKEY | FSHIFT, VK_F3, ID_VIEW_FUNCTIONS},
+        {FVIRTKEY | FSHIFT, VK_F4, ID_VIEW_SYMBOLS},
+        {FVIRTKEY | FSHIFT, VK_F7, ID_VIEW_MEMORY},
+        {FVIRTKEY | FSHIFT, VK_F12, ID_VIEW_STRINGS},
         {FVIRTKEY, 'T', ID_STRUCT_OFFSET},
         {FVIRTKEY, 'M', ID_ENUM_OPERAND},
         {FVIRTKEY, 'Y', ID_SET_PROTOTYPE},
-        {FVIRTKEY | FSHIFT, VK_F1, ID_TYPES_EDITOR},
     };
     g_accelerators = CreateAcceleratorTableW(const_cast<LPACCEL>(accelerators), static_cast<int>(std::size(accelerators)));
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
-        if (!TranslateAcceleratorW(window, g_accelerators, &message)) {
+        bool allow_accel = true;
+        if (message.message == WM_KEYDOWN || message.message == WM_SYSKEYDOWN) {
+            HWND focus = GetFocus();
+            wchar_t cls[64]{};
+            if (focus) GetClassNameW(focus, cls, 64);
+            const LONG_PTR style = focus ? GetWindowLongPtrW(focus, GWL_STYLE) : 0;
+            const bool is_editable_input = focus &&
+                ((_wcsicmp(cls, L"Edit") == 0 || _wcsicmp(cls, L"RichEdit20W") == 0 ||
+                  _wcsicmp(cls, L"RICHEDIT50W") == 0 || _wcsicmp(cls, L"RichEditD2DPT") == 0) &&
+                 (style & ES_READONLY) == 0);
+            const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+            if (is_editable_input && !ctrl && !alt) {
+                allow_accel = false;
+            } else if (!ctrl && !alt &&
+                       (message.wParam == VK_TAB || message.wParam == VK_ESCAPE ||
+                        message.wParam == VK_HOME || message.wParam == VK_SPACE)) {
+                allow_accel = (focus == window || focus == g_view || focus == g_editor || focus == g_tabs || focus == g_tree);
+            } else if (focus && GetAncestor(focus, GA_ROOT) != window && !ctrl && !alt) {
+                allow_accel = false;
+            }
+        }
+        if (!(allow_accel && TranslateAcceleratorW(window, g_accelerators, &message))) {
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
