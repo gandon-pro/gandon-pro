@@ -1747,8 +1747,8 @@ LRESULT CALLBACK minimap_proc(HWND window, UINT message, WPARAM wparam, LPARAM l
             const auto map_x = [&](int value) { return static_cast<int>(std::lround(t.origin_x + value * t.scale)); };
             const auto map_y = [&](int value) { return static_cast<int>(std::lround(t.origin_y + value * t.scale)); };
 
-            // Dimmed outside-viewport region + lighter visible viewport background (IDA Pro 9.5 style)
-            HBRUSH outside_bg = CreateSolidBrush(THEMED_RGB(122, 122, 122));
+            // Theme-matched dimmed outside-viewport region + subtle brighter visible viewport (IDA Pro 9.5 dark/light)
+            HBRUSH outside_bg = CreateSolidBrush(g_light_theme ? RGB(195, 199, 205) : RGB(27, 28, 31));
             FillRect(dc, &client, outside_bg); DeleteObject(outside_bg);
 
             RECT view{}; GetClientRect(g_view, &view);
@@ -1758,9 +1758,9 @@ LRESULT CALLBACK minimap_proc(HWND window, UINT message, WPARAM wparam, LPARAM l
                 map_x(static_cast<int>((g_graph_scroll_x + view.right) / zoom)), map_y(static_cast<int>((g_graph_scroll_y + view.bottom) / zoom))};
             RECT clipped{};
             if (IntersectRect(&clipped, &viewport, &client) && clipped.right > clipped.left && clipped.bottom > clipped.top) {
-                HBRUSH inside_bg = CreateSolidBrush(THEMED_RGB(172, 172, 172));
+                HBRUSH inside_bg = CreateSolidBrush(g_light_theme ? RGB(232, 235, 240) : RGB(43, 46, 52));
                 FillRect(dc, &clipped, inside_bg); DeleteObject(inside_bg);
-                HBRUSH vp_border = CreateSolidBrush(THEMED_RGB(96, 96, 96));
+                HBRUSH vp_border = CreateSolidBrush(g_light_theme ? RGB(150, 156, 166) : RGB(78, 83, 93));
                 FrameRect(dc, &clipped, vp_border); DeleteObject(vp_border);
             }
 
@@ -1770,8 +1770,8 @@ LRESULT CALLBACK minimap_proc(HWND window, UINT message, WPARAM wparam, LPARAM l
                 const auto source = by_start.find(edge.from); const auto target_block = by_start.find(edge.to);
                 if (source == by_start.end() || target_block == by_start.end()) continue;
                 const auto* a = source->second; const auto* b = target_block->second;
-                const COLORREF color = edge.kind == GraphEdgeKind::TrueBranch ? RGB(45, 165, 75)
-                    : edge.kind == GraphEdgeKind::FalseBranch ? RGB(210, 65, 65) : RGB(45, 115, 225);
+                const COLORREF color = edge.kind == GraphEdgeKind::TrueBranch ? RGB(87, 204, 118)
+                    : edge.kind == GraphEdgeKind::FalseBranch ? RGB(235, 95, 95) : RGB(90, 155, 245);
                 HPEN pen = CreatePen(PS_SOLID, 1, color); HGDIOBJ old = SelectObject(dc, pen);
                 const int sx = map_x(a->x + a->width / 2), sy = map_y(a->y + a->height), tx = map_x(b->x + b->width / 2), ty = map_y(b->y);
                 MoveToEx(dc, sx, sy, nullptr); LineTo(dc, sx, (sy + ty) / 2); LineTo(dc, tx, (sy + ty) / 2); LineTo(dc, tx, ty);
@@ -1784,14 +1784,24 @@ LRESULT CALLBACK minimap_proc(HWND window, UINT message, WPARAM wparam, LPARAM l
                 if (box.bottom - box.top < 4) box.bottom = box.top + 4;
                 const bool active = block.start == g_current_address || std::any_of(block.instructions.begin(), block.instructions.end(),
                     [](const auto* instruction) { return instruction->address == g_current_address; });
-                COLORREF fill_color = active ? THEMED_RGB(98, 93, 90) : THEMED_RGB(46, 46, 46);
-                if (const auto tag = g_graph_colors.find(block.start); tag != g_graph_colors.end()) fill_color = tag->second;
+                COLORREF fill_color = active
+                    ? (g_light_theme ? RGB(196, 218, 248) : RGB(59, 75, 100))
+                    : (g_light_theme ? RGB(215, 220, 226) : RGB(56, 60, 68));
+                std::optional<COLORREF> custom_tag;
+                if (const auto tag = g_graph_colors.find(block.start); tag != g_graph_colors.end()) custom_tag = tag->second;
                 RECT shadow = box; OffsetRect(&shadow, 1, 1);
-                HBRUSH sh_br = CreateSolidBrush(THEMED_RGB(88, 88, 88));
+                HBRUSH sh_br = CreateSolidBrush(g_light_theme ? RGB(165, 170, 178) : RGB(18, 19, 22));
                 FillRect(dc, &shadow, sh_br); DeleteObject(sh_br);
-                HBRUSH body = CreateSolidBrush(fill_color);
+                HBRUSH body = CreateSolidBrush(custom_tag ? *custom_tag : fill_color);
                 FillRect(dc, &box, body); DeleteObject(body);
-                HBRUSH outline = CreateSolidBrush(THEMED_RGB(26, 26, 26));
+                if (active || custom_tag) {
+                    RECT cap = box;
+                    cap.bottom = (std::min)(box.bottom, box.top + (box.bottom - box.top >= 6 ? 3 : 2));
+                    HBRUSH cap_br = CreateSolidBrush(custom_tag ? *custom_tag : RGB(53, 116, 240));
+                    FillRect(dc, &cap, cap_br); DeleteObject(cap_br);
+                }
+                const COLORREF border_col = active ? RGB(53, 116, 240) : (g_light_theme ? RGB(120, 128, 138) : RGB(86, 92, 104));
+                HBRUSH outline = CreateSolidBrush(border_col);
                 FrameRect(dc, &box, outline); DeleteObject(outline);
             }
         }
