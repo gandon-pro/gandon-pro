@@ -325,9 +325,18 @@ bool g_view_a_graph_mode = true;
 std::vector<ViewKind> g_open_tabs = { ViewKind::ViewA, ViewKind::Hex, ViewKind::Imports, ViewKind::Exports };
 std::vector<RECT> g_tab_close_rects;
 int g_hover_close_tab = -1;
+int g_drag_tab = -1;
+int g_drag_target = -1;
+POINT g_drag_start{};
+bool g_tab_dragging = false;
 std::atomic_bool g_ui_shutting_down{false};
 gandon::McpServer g_mcp_server;
 gandon::McpServerConfig g_mcp_config;
+
+bool is_tab_closable(int index) {
+    return index >= 0 && static_cast<std::size_t>(index) < g_open_tabs.size() &&
+           g_open_tabs[static_cast<std::size_t>(index)] != ViewKind::ViewA;
+}
 
 ViewKind active_view_kind();
 int active_legacy_tab();
@@ -348,6 +357,7 @@ void mcp_configure_dialog(HWND window);
 void mcp_copy_url(HWND window);
 void mcp_copy_client_config(HWND window);
 void mcp_show_status(HWND window);
+namespace dock { void toggle(const std::wstring& id); bool is_visible(const std::wstring& id); }
 void py_console_log(const std::wstring& text);
 void py_console_log_command(int id);
 void functions_window(HWND owner);
@@ -1293,36 +1303,110 @@ LRESULT CALLBACK dark_background_subclass(HWND window, UINT message, WPARAM wpar
         FillRect(reinterpret_cast<HDC>(wparam), &client, brush); DeleteObject(brush);
         return 1;
     }
+    if (id == 2 && message == WM_SETCURSOR && g_tab_dragging) {
+        SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
+        return TRUE;
+    }
     if (id == 2 && message == WM_MOUSEMOVE) {
         TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, window, 0};
         TrackMouseEvent(&tme);
         const POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        if (g_drag_tab >= 0 && (wparam & MK_LBUTTON)) {
+            if (!g_tab_dragging && std::abs(pt.x - g_drag_start.x) >= 6) {
+                g_tab_dragging = true;
+                SetCapture(window);
+                SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
+            }
+            if (g_tab_dragging) {
+                const int count = TabCtrl_GetItemCount(window);
+                int gap = count;
+                for (int i = 0; i < count; ++i) {
+                    RECT rc{};
+                    if (TabCtrl_GetItemRect(window, i, &rc) && pt.x < (rc.left + rc.right) / 2) {
+                        gap = i;
+                        break;
+                    }
+                }
+                if (gap != g_drag_target) {
+                    g_drag_target = gap;
+                    InvalidateRect(window, nullptr, FALSE);
+                }
+                return 0;
+            }
+        }
         int hit = -1;
         for (std::size_t i = 0; i < g_tab_close_rects.size(); ++i) {
-            if (i > 0 && PtInRect(&g_tab_close_rects[i], pt)) { hit = static_cast<int>(i); break; }
+            if (is_tab_closable(static_cast<int>(i)) && PtInRect(&g_tab_close_rects[i], pt)) {
+                hit = static_cast<int>(i);
+                break;
+            }
         }
         if (hit != g_hover_close_tab) { g_hover_close_tab = hit; InvalidateRect(window, nullptr, FALSE); }
     }
     if (id == 2 && message == WM_MOUSELEAVE) {
-        if (g_hover_close_tab != -1) { g_hover_close_tab = -1; InvalidateRect(window, nullptr, FALSE); }
+        if (!g_tab_dragging && g_hover_close_tab != -1) { g_hover_close_tab = -1; InvalidateRect(window, nullptr, FALSE); }
     }
     if (id == 2 && message == WM_LBUTTONDOWN) {
         const POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
-        for (std::size_t i = 1; i < g_tab_close_rects.size(); ++i) {
-            if (PtInRect(&g_tab_close_rects[i], pt)) {
+        for (std::size_t i = 0; i < g_tab_close_rects.size(); ++i) {
+            if (is_tab_closable(static_cast<int>(i)) && PtInRect(&g_tab_close_rects[i], pt)) {
                 close_tab(g_main_window, static_cast<int>(i));
                 return 0;
             }
         }
+        RECT client{}; GetClientRect(window, &client);
+        const int count = TabCtrl_GetItemCount(window);
+        int hit_tab = -1;
+        for (int i = 0; i < count; ++i) {
+            RECT rc{};
+            if (TabCtrl_GetItemRect(window, i, &rc)) {
+                rc.top = 0; rc.bottom = client.bottom - 1;
+                if (PtInRect(&rc, pt)) { hit_tab = i; break; }
+            }
+        }
+        g_drag_tab = hit_tab;
+        g_drag_target = hit_tab;
+        g_drag_start = pt;
+        g_tab_dragging = false;
+    }
+    if (id == 2 && (message == WM_LBUTTONUP || message == WM_CAPTURECHANGED)) {
+        const bool was_dragging = g_tab_dragging;
+        const int from_idx = g_drag_tab;
+        const int gap_idx = g_drag_target;
+        g_tab_dragging = false;
+        g_drag_tab = -1;
+        g_drag_target = -1;
+        if (was_dragging) {
+            if (GetCapture() == window) ReleaseCapture();
+            if (message == WM_LBUTTONUP && from_idx >= 0 && from_idx < static_cast<int>(g_open_tabs.size()) && gap_idx >= 0) {
+                int dest = (gap_idx > from_idx) ? (gap_idx - 1) : gap_idx;
+                dest = (std::max)(0, (std::min)(dest, static_cast<int>(g_open_tabs.size()) - 1));
+                if (dest != from_idx) {
+                    const ViewKind moved = g_open_tabs[static_cast<std::size_t>(from_idx)];
+                    g_open_tabs.erase(g_open_tabs.begin() + from_idx);
+                    g_open_tabs.insert(g_open_tabs.begin() + dest, moved);
+                    rebuild_tab_strip();
+                    TabCtrl_SetCurSel(window, dest);
+                    set_editor_text();
+                }
+            }
+            InvalidateRect(window, nullptr, FALSE);
+            return 0;
+        }
     }
     if (id == 2 && message == WM_MBUTTONUP) {
         const POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        RECT client{}; GetClientRect(window, &client);
         const int count = TabCtrl_GetItemCount(window);
-        for (int i = 1; i < count; ++i) {
+        for (int i = 0; i < count; ++i) {
+            if (!is_tab_closable(i)) continue;
             RECT rc{};
-            if (TabCtrl_GetItemRect(window, i, &rc) && PtInRect(&rc, pt)) {
-                close_tab(g_main_window, i);
-                return 0;
+            if (TabCtrl_GetItemRect(window, i, &rc)) {
+                rc.top = 0; rc.bottom = client.bottom - 1;
+                if (PtInRect(&rc, pt)) {
+                    close_tab(g_main_window, i);
+                    return 0;
+                }
             }
         }
     }
@@ -1337,17 +1421,22 @@ LRESULT CALLBACK dark_background_subclass(HWND window, UINT message, WPARAM wpar
         g_tab_close_rects.assign(static_cast<std::size_t>((std::max)(0, count)), RECT{});
         HFONT old_font = reinterpret_cast<HFONT>(SelectObject(dc, g_ui_font));
         SetBkMode(dc, TRANSPARENT);
+        RECT first_rc{}, last_rc{};
         for (int index = 0; index < count; ++index) {
             RECT item_rect{};
             if (!TabCtrl_GetItemRect(window, index, &item_rect)) continue;
+            item_rect.top = 0;
+            item_rect.bottom = (std::max)(1L, client.bottom - 1);
+            if (index == 0) first_rc = item_rect;
+            last_rc = item_rect;
             wchar_t label[128]{};
             TCITEMW item{}; item.mask = TCIF_TEXT; item.pszText = label; item.cchTextMax = 128;
             TabCtrl_GetItem(window, index, &item);
             std::wstring caption = label;
             while (!caption.empty() && caption.back() == L' ') caption.pop_back();
             const bool active = index == selected;
-            const bool closable = index > 0;
-            HBRUSH fill = CreateSolidBrush(active ? THEMED_RGB(24, 27, 32) : THEMED_RGB(18, 22, 27));
+            const bool closable = is_tab_closable(index);
+            HBRUSH fill = CreateSolidBrush(active ? THEMED_RGB(30, 34, 40) : THEMED_RGB(20, 24, 29));
             FillRect(dc, &item_rect, fill); DeleteObject(fill);
             if (active) {
                 RECT underline = item_rect; underline.top = underline.bottom - 2;
@@ -1359,9 +1448,10 @@ LRESULT CALLBACK dark_background_subclass(HWND window, UINT message, WPARAM wpar
             RECT text = item_rect;
             text.left += 10;
             if (closable) text.right -= 20;
+            else text.right -= 10;
             DrawTextW(dc, caption.c_str(), -1, &text, DT_SINGLELINE | DT_VCENTER | (closable ? DT_LEFT : DT_CENTER) | DT_NOPREFIX);
             if (closable) {
-                RECT close_rc{item_rect.right - 18, item_rect.top + 5, item_rect.right - 4, item_rect.bottom - 5};
+                RECT close_rc{item_rect.right - 18, (item_rect.top + item_rect.bottom) / 2 - 7, item_rect.right - 4, (item_rect.top + item_rect.bottom) / 2 + 7};
                 g_tab_close_rects[static_cast<std::size_t>(index)] = close_rc;
                 if (g_hover_close_tab == index) {
                     HBRUSH hbr = CreateSolidBrush(THEMED_RGB(52, 64, 74));
@@ -1374,6 +1464,22 @@ LRESULT CALLBACK dark_background_subclass(HWND window, UINT message, WPARAM wpar
                 MoveToEx(dc, cx - 3, cy - 3, nullptr); LineTo(dc, cx + 4, cy + 4);
                 MoveToEx(dc, cx + 3, cy - 3, nullptr); LineTo(dc, cx - 4, cy + 4);
                 SelectObject(dc, old_pen); DeleteObject(xpen);
+            }
+        }
+        if (g_tab_dragging && g_drag_tab >= 0 && g_drag_target >= 0 && count > 0) {
+            int dest = (g_drag_target > g_drag_tab) ? (g_drag_target - 1) : g_drag_target;
+            dest = (std::max)(0, (std::min)(dest, count - 1));
+            if (dest != g_drag_tab) {
+                int bar_x = first_rc.left;
+                if (g_drag_target >= count) {
+                    bar_x = last_rc.right - 2;
+                } else {
+                    RECT grc{};
+                    if (TabCtrl_GetItemRect(window, g_drag_target, &grc)) bar_x = grc.left;
+                }
+                RECT indicator{bar_x, 1, bar_x + 3, (std::max)(2L, client.bottom - 1)};
+                HBRUSH ind_br = CreateSolidBrush(THEMED_RGB(53, 116, 240));
+                FillRect(dc, &indicator, ind_br); DeleteObject(ind_br);
             }
         }
         RECT bottom_line{0, client.bottom - 1, client.right, client.bottom};
@@ -1574,16 +1680,16 @@ LRESULT CALLBACK navband_proc(HWND window, UINT message, WPARAM wparam, LPARAM l
     return DefWindowProcW(window, message, wparam, lparam);
 }
 
-struct MinimapTransform { double scale{1}; double origin_x{8}, origin_y{8}; int world_width{1}, world_height{1}; };
+struct MinimapTransform { double scale{1}; double origin_x{10}, origin_y{10}; int world_width{1}, world_height{1}; };
 // Uniform scale (aspect ratio preserved) and centred, like IDA's graph overview.
 MinimapTransform minimap_transform(const RECT& client) {
     MinimapTransform t;
     const auto [world_width, world_height] = graph_content_size();
     t.world_width = (std::max)(1, world_width); t.world_height = (std::max)(1, world_height);
-    const double map_width = (std::max)(1L, client.right - 16L), map_height = (std::max)(1L, client.bottom - 28L);
+    const double map_width = (std::max)(1L, client.right - 20L), map_height = (std::max)(1L, client.bottom - 20L);
     t.scale = (std::min)(map_width / t.world_width, map_height / t.world_height);
-    t.origin_x = 8 + (map_width - t.world_width * t.scale) / 2.0;
-    t.origin_y = 8 + (map_height - t.world_height * t.scale) / 2.0;
+    t.origin_x = 10 + (map_width - t.world_width * t.scale) / 2.0;
+    t.origin_y = 10 + (map_height - t.world_height * t.scale) / 2.0;
     return t;
 }
 
@@ -1603,6 +1709,11 @@ void minimap_scroll_to(HWND window, int mouse_x, int mouse_y) {
 
 LRESULT CALLBACK minimap_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     if (message == WM_ERASEBKGND) return 1;
+    if (message == WM_MOUSEWHEEL && g_view) {
+        SendMessageW(g_view, WM_MOUSEWHEEL, wparam, lparam);
+        invalidate_minimap();
+        return 0;
+    }
     if ((message == WM_LBUTTONDOWN || (message == WM_MOUSEMOVE && g_minimap_dragging)) && g_view && !g_graph_blocks.empty()) {
         minimap_scroll_to(window, static_cast<int>(static_cast<short>(LOWORD(lparam))), static_cast<int>(static_cast<short>(HIWORD(lparam))));
         if (message == WM_LBUTTONDOWN) { g_minimap_dragging = true; SetCapture(window); invalidate_minimap(); }
@@ -1619,12 +1730,19 @@ LRESULT CALLBACK minimap_proc(HWND window, UINT message, WPARAM wparam, LPARAM l
     if (message == WM_PAINT) {
         PAINTSTRUCT paint{}; HDC target = BeginPaint(window, &paint);
         RECT client{}; GetClientRect(window, &client);
+        const int cw = (std::max)(1L, client.right), ch = (std::max)(1L, client.bottom);
         HDC dc = CreateCompatibleDC(target);
-        HBITMAP bitmap = CreateCompatibleBitmap(target, client.right, client.bottom);
+        HBITMAP bitmap = CreateCompatibleBitmap(target, cw, ch);
         HGDIOBJ old_bitmap = SelectObject(dc, bitmap);
-        HBRUSH background = CreateSolidBrush(THEMED_RGB(16, 19, 24));
+        HBRUSH background = CreateSolidBrush(THEMED_RGB(18, 22, 27));
         FillRect(dc, &client, background); DeleteObject(background);
-        if (!g_graph_blocks.empty()) {
+        if (g_graph_blocks.empty()) {
+            SetBkMode(dc, TRANSPARENT); SetTextColor(dc, THEMED_RGB(120, 132, 146));
+            HFONT old_font = reinterpret_cast<HFONT>(SelectObject(dc, g_ui_font));
+            RECT tr = client;
+            DrawTextW(dc, L"No graph to display", -1, &tr, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX);
+            SelectObject(dc, old_font);
+        } else {
             const auto t = minimap_transform(client);
             const auto map_x = [&](int value) { return static_cast<int>(std::lround(t.origin_x + value * t.scale)); };
             const auto map_y = [&](int value) { return static_cast<int>(std::lround(t.origin_y + value * t.scale)); };
@@ -1643,31 +1761,33 @@ LRESULT CALLBACK minimap_proc(HWND window, UINT message, WPARAM wparam, LPARAM l
             }
             for (const auto& block : g_graph_blocks) {
                 RECT box{map_x(block.x), map_y(block.y), map_x(block.x + block.width), map_y(block.y + block.height)};
-                if (box.right <= box.left) box.right = box.left + 2;
-                if (box.bottom <= box.top) box.bottom = box.top + 2;
+                if (box.right - box.left < 3) box.right = box.left + 3;
+                if (box.bottom - box.top < 3) box.bottom = box.top + 3;
                 const bool active = block.start == g_current_address || std::any_of(block.instructions.begin(), block.instructions.end(),
                     [](const auto* instruction) { return instruction->address == g_current_address; });
-                COLORREF block_color = active ? THEMED_RGB(0, 139, 190) : THEMED_RGB(88, 108, 128);
-                if (const auto tag = g_graph_colors.find(block.start); tag != g_graph_colors.end()) block_color = tag->second;
-                HBRUSH fill = CreateSolidBrush(block_color);
-                FillRect(dc, &box, fill); DeleteObject(fill);
-                HBRUSH outline = CreateSolidBrush(THEMED_RGB(16, 19, 24)); FrameRect(dc, &box, outline); DeleteObject(outline);
+                COLORREF cap_color = active ? THEMED_RGB(53, 116, 240) : THEMED_RGB(78, 118, 158);
+                if (const auto tag = g_graph_colors.find(block.start); tag != g_graph_colors.end()) cap_color = tag->second;
+                HBRUSH body = CreateSolidBrush(THEMED_RGB(32, 39, 47));
+                FillRect(dc, &box, body); DeleteObject(body);
+                RECT cap = box;
+                cap.bottom = (std::min)(box.bottom, box.top + (box.bottom - box.top >= 5 ? 3 : 2));
+                HBRUSH cap_br = CreateSolidBrush(cap_color);
+                FillRect(dc, &cap, cap_br); DeleteObject(cap_br);
+                HBRUSH outline = CreateSolidBrush(active ? THEMED_RGB(53, 116, 240) : THEMED_RGB(62, 74, 86));
+                FrameRect(dc, &box, outline); DeleteObject(outline);
             }
             RECT view{}; GetClientRect(g_view, &view);
-            const double zoom = static_cast<double>(g_graph_zoom) / 100.0;
+            const double zoom = (std::max)(0.1, static_cast<double>(g_graph_zoom) / 100.0);
             RECT viewport{
                 map_x(static_cast<int>(g_graph_scroll_x / zoom)), map_y(static_cast<int>(g_graph_scroll_y / zoom)),
                 map_x(static_cast<int>((g_graph_scroll_x + view.right) / zoom)), map_y(static_cast<int>((g_graph_scroll_y + view.bottom) / zoom))};
-            IntersectRect(&viewport, &viewport, &client);
-            HPEN frame = CreatePen(PS_SOLID, 2, THEMED_RGB(230, 190, 70)); HGDIOBJ old = SelectObject(dc, frame);
+            RECT clamp_area{1, 1, (std::max)(2L, client.right - 1), (std::max)(2L, client.bottom - 1)};
+            IntersectRect(&viewport, &viewport, &clamp_area);
+            HPEN frame = CreatePen(PS_SOLID, 2, THEMED_RGB(92, 157, 255)); HGDIOBJ old = SelectObject(dc, frame);
             HGDIOBJ old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
             if (viewport.right > viewport.left && viewport.bottom > viewport.top) Rectangle(dc, viewport.left, viewport.top, viewport.right, viewport.bottom);
             SelectObject(dc, old_brush); SelectObject(dc, old); DeleteObject(frame);
         }
-        SetBkMode(dc, TRANSPARENT); SetTextColor(dc, THEMED_RGB(170, 185, 198));
-        HFONT old_font = reinterpret_cast<HFONT>(SelectObject(dc, g_ui_font));
-        TextOutW(dc, 8, client.bottom - 18, L"Graph overview", 14);
-        SelectObject(dc, old_font);
         BitBlt(target, 0, 0, client.right, client.bottom, dc, 0, 0, SRCCOPY);
         SelectObject(dc, old_bitmap); DeleteObject(bitmap); DeleteDC(dc);
         EndPaint(window, &paint); return 0;
@@ -3581,10 +3701,9 @@ void fit_graph(HWND window) {
 }
 
 void toggle_minimap(HWND window) {
-    g_minimap_visible = !g_minimap_visible;
-    if (g_minimap) ShowWindow(g_minimap, g_minimap_visible && is_graph_view_active() ? SW_SHOW : SW_HIDE);
+    dock::toggle(L"overview");
+    g_minimap_visible = dock::is_visible(L"overview");
     CheckMenuItem(GetMenu(window), ID_TOGGLE_MINIMAP, MF_BYCOMMAND | (g_minimap_visible ? MF_CHECKED : MF_UNCHECKED));
-    SendMessageW(window, WM_SIZE, 0, 0);
     InvalidateRect(g_view, nullptr, FALSE);
 }
 
@@ -4187,7 +4306,7 @@ void rebuild_tab_strip() {
     TabCtrl_DeleteAllItems(g_tabs);
     for (std::size_t i = 0; i < g_open_tabs.size(); ++i) {
         std::wstring label = view_kind_title(g_open_tabs[i]);
-        if (i > 0) label += L"    "; // extra space for close button
+        if (g_open_tabs[i] != ViewKind::ViewA) label += L"    "; // extra space for close button
         TCITEMW item{TCIF_TEXT, 0, 0, label.data(), 0, 0, 0};
         TabCtrl_InsertItem(g_tabs, static_cast<int>(i), &item);
     }
@@ -4208,7 +4327,7 @@ void open_or_focus_view(HWND window, ViewKind kind) {
         g_open_tabs.push_back(kind);
         idx = static_cast<int>(g_open_tabs.size()) - 1;
         if (g_tabs) {
-            std::wstring label = view_kind_title(kind) + (idx > 0 ? L"    " : L"");
+            std::wstring label = view_kind_title(kind) + (kind != ViewKind::ViewA ? L"    " : L"");
             TCITEMW item{TCIF_TEXT, 0, 0, label.data(), 0, 0, 0};
             TabCtrl_InsertItem(g_tabs, idx, &item);
         }
@@ -4222,16 +4341,16 @@ void open_or_focus_view(HWND window, ViewKind kind) {
 }
 
 void close_tab(HWND window, int index) {
-    if (index <= 0 || index >= static_cast<int>(g_open_tabs.size())) return; // IDA View-A is pinned
+    if (!is_tab_closable(index)) return; // IDA View-A cannot be closed
     const int cur = g_tabs ? TabCtrl_GetCurSel(g_tabs) : 0;
     g_open_tabs.erase(g_open_tabs.begin() + index);
     g_hover_close_tab = -1;
     rebuild_tab_strip();
-    if (g_tabs) {
+    if (g_tabs && !g_open_tabs.empty()) {
         int next = cur;
-        if (cur == index) next = (std::min)(index - 1, static_cast<int>(g_open_tabs.size()) - 1);
+        if (cur == index) next = (index > 0) ? (std::min)(index - 1, static_cast<int>(g_open_tabs.size()) - 1) : 0;
         else if (cur > index) next = cur - 1;
-        TabCtrl_SetCurSel(g_tabs, (std::max)(0, next));
+        TabCtrl_SetCurSel(g_tabs, (std::max)(0, (std::min)(next, static_cast<int>(g_open_tabs.size()) - 1)));
     }
     g_session_tab = active_legacy_tab();
     if (is_graph_view_active()) rebuild_graph_model();
@@ -4249,15 +4368,15 @@ void set_editor_text() {
     if (graph) {
         SetWindowPos(g_editor, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW);
         SetWindowPos(g_view, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        if (g_minimap) ShowWindow(g_minimap, g_minimap_visible ? SW_SHOW : SW_HIDE);
         if (HWND parent = GetParent(g_view)) { RECT area{}; GetWindowRect(g_view, &area); MapWindowPoints(nullptr, parent, reinterpret_cast<POINT*>(&area), 2); RedrawWindow(parent, &area, nullptr, RDW_INVALIDATE | RDW_ERASE); }
         RedrawWindow(g_view, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
         InvalidateRect(g_view, nullptr, TRUE);
         UpdateWindow(g_view);
+        invalidate_minimap();
         return;
     }
     SetWindowPos(g_view, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW);
-    if (g_minimap) ShowWindow(g_minimap, SW_HIDE);
+    invalidate_minimap();
     SetWindowPos(g_editor, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
     std::wstring text;
     const std::wstring* shared_text = nullptr;
@@ -7214,7 +7333,7 @@ struct Panel {
     RECT float_rect{140, 140, 780, 540};
 };
 std::vector<std::unique_ptr<Panel>> panels;
-int sizes[3] = {290, 360, 150};
+int sizes[3] = {290, 240, 150};
 HWND bars[3]{}, splitters[3]{};
 std::wstring active_id[3];
 RECT central{};
@@ -7369,6 +7488,7 @@ void make_floating(Panel& p) {
     SetWindowPos(p.content, nullptr, 0, 0, rc.right, rc.bottom, SWP_NOZORDER | SWP_SHOWWINDOW);
     SetWindowTextW(p.frame, title_of(p).c_str());
     ShowWindow(p.frame, SW_SHOWNOACTIVATE);
+    if (p.id == L"overview") { g_minimap_visible = true; if (host) CheckMenuItem(GetMenu(host), ID_TOGGLE_MINIMAP, MF_BYCOMMAND | MF_CHECKED); }
     relayout(); save();
 }
 
@@ -7377,6 +7497,7 @@ void dock_to(Panel& p, Area area) {
     if (p.frame) { SetParent(p.content, host); DestroyWindow(p.frame); p.frame = nullptr; }
     p.area = area; p.last_docked = area; p.visible = true; active_id[area] = p.id;
     ShowWindow(p.content, SW_SHOW);
+    if (p.id == L"overview") { g_minimap_visible = true; if (host) CheckMenuItem(GetMenu(host), ID_TOGGLE_MINIMAP, MF_BYCOMMAND | MF_CHECKED); }
     relayout(); save();
 }
 
@@ -7384,7 +7505,13 @@ void close_panel(Panel& p) {
     p.visible = false;
     if (p.frame) ShowWindow(p.frame, SW_HIDE);
     if (p.content) ShowWindow(p.content, SW_HIDE);
+    if (p.id == L"overview") { g_minimap_visible = false; if (host) CheckMenuItem(GetMenu(host), ID_TOGGLE_MINIMAP, MF_BYCOMMAND | MF_UNCHECKED); }
     relayout(); save();
+}
+
+bool is_visible(const std::wstring& id) {
+    Panel* p = find(id);
+    return p && p->visible;
 }
 
 void show(const std::wstring& id) {
@@ -7534,27 +7661,31 @@ void init(HWND main) {
     }
     add(L"navigator", L"Navigator", kLeft, true);
     add(L"functions", L"Functions", kLeft, true, [](HWND parent) { return funcwin_create(parent); }, true);
+    add(L"overview", L"Graph overview", kRight, true);
     add(L"output", L"Output", kBottom, true);
     add(L"python", L"Python", kBottom, false, [](HWND parent) { return pyconsole_create(parent); });
     add(L"types", L"Local Types Editor", kFloat, false, [](HWND parent) { return typewin_create(parent); });
     add(L"diff", L"Diff", kBottom, false, [](HWND parent) { return diffwin_create(parent); }, true);
     active_id[kLeft] = L"functions";
+    active_id[kRight] = L"overview";
 }
 
 void reset_defaults() {
-    sizes[kLeft] = 290; sizes[kRight] = 360; sizes[kBottom] = 150;
+    sizes[kLeft] = 290; sizes[kRight] = 240; sizes[kBottom] = 150;
     struct Default { const wchar_t* id; Area area; bool visible; };
-    const Default defaults[] = {{L"navigator", kLeft, true}, {L"functions", kLeft, true}, {L"output", kBottom, true}, {L"python", kBottom, false}, {L"types", kFloat, false}, {L"diff", kBottom, false}};
+    const Default defaults[] = {{L"navigator", kLeft, true}, {L"functions", kLeft, true}, {L"overview", kRight, true}, {L"output", kBottom, true}, {L"python", kBottom, false}, {L"types", kFloat, false}, {L"diff", kBottom, false}};
     for (const auto& d : defaults) {
         Panel* p = find(d.id);
         if (!p) continue;
         if (p->frame) { SetParent(p->content, host); DestroyWindow(p->frame); p->frame = nullptr; }
         p->area = d.area; p->last_docked = d.area == kFloat ? kBottom : d.area; p->visible = d.visible && p->content != nullptr;
-        if (!p->visible && p->content) ShowWindow(p->content, SW_HIDE);
+        if (p->content) ShowWindow(p->content, p->visible ? SW_SHOW : SW_HIDE);
         if (p->visible) active_id[d.area] = p->id;
     }
     for (auto& a : active_id) a.clear();
     for (const auto& d : defaults) if (d.visible && d.area != kFloat && active_id[d.area].empty()) active_id[d.area] = d.id;
+    g_minimap_visible = is_visible(L"overview");
+    if (host) CheckMenuItem(GetMenu(host), ID_TOGGLE_MINIMAP, MF_BYCOMMAND | (g_minimap_visible ? MF_CHECKED : MF_UNCHECKED));
 }
 
 std::filesystem::path layout_file() {
@@ -10139,7 +10270,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         g_navband = CreateWindowExW(0, L"GandonNavBand", nullptr, WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, window, nullptr, g_instance, nullptr);
         SetWindowSubclass(g_tabs, dark_background_subclass, 2, 0);
         SendMessageW(g_tabs, WM_SETFONT, reinterpret_cast<WPARAM>(g_ui_font), FALSE);
-        TabCtrl_SetPadding(g_tabs, 12, 5);
+        TabCtrl_SetPadding(g_tabs, 12, 4);
         TreeView_SetBkColor(g_tree, THEMED_RGB(24, 27, 32)); TreeView_SetTextColor(g_tree, THEMED_RGB(215, 228, 238));
         if (LoadLibraryW(L"Msftedit.dll"))
             g_editor = CreateWindowExW(WS_EX_CLIENTEDGE, L"RICHEDIT50W", L"Open EXE file from File -> Open Binary (Ctrl+O)...", WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_NOHIDESEL, 0, 0, 0, 0, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_EDITOR)), g_instance, nullptr);
@@ -10188,7 +10319,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
             }
         }
         SendMessageW(g_tree, WM_SETFONT, reinterpret_cast<WPARAM>(g_ui_font), TRUE);
-        dock::set_content(L"navigator", g_tree); dock::set_content(L"output", g_output);
+        dock::set_content(L"navigator", g_tree); dock::set_content(L"overview", g_minimap); dock::set_content(L"output", g_output);
         dock::load();
         SendMessageW(g_tabs, WM_SETFONT, reinterpret_cast<WPARAM>(g_ui_font), TRUE);
         SendMessageW(g_editor, WM_SETFONT, reinterpret_cast<WPARAM>(g_code_font), TRUE);
@@ -10259,13 +10390,13 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         set_editor_text();
         SetTimer(window, ID_SESSION_TIMER, 3000, nullptr);
         dock::materialise();
+        g_minimap_visible = dock::is_visible(L"overview");
+        CheckMenuItem(GetMenu(window), ID_TOGGLE_MINIMAP, MF_BYCOMMAND | (g_minimap_visible ? MF_CHECKED : MF_UNCHECKED));
         mcp_start_server(window);
         return 0;
     }
     case WM_SIZE: {
         RECT client{}; GetClientRect(window, &client); SendMessageW(g_status, WM_SIZE, 0, 0); RECT status_rect{}; GetWindowRect(g_status, &status_rect); const int status_height = status_rect.bottom - status_rect.top; const int width = client.right, height = client.bottom - status_height;
-        const bool dock_minimap = g_minimap_visible && is_graph_view_active();
-        const int minimap_width = dock_minimap ? 230 : 0;
         constexpr int toolbar_height = 28;
         if (g_toolbar) MoveWindow(g_toolbar, 0, 0, width, toolbar_height - 2, TRUE);
         {
@@ -10275,17 +10406,15 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         }
         const RECT central = dock::layout({0, toolbar_height, width, height});
         const int cl = central.left, cr = central.right, cb = central.bottom;
-        MoveWindow(g_tabs, cl + 6, 6 + toolbar_height, cr - cl - 12, 28, TRUE);
-        constexpr int band_height = 18, content_top = 36 + toolbar_height + band_height + 4;
-        const int view_width_docked = (std::max)(120, cr - cl - 12 - minimap_width);
-        const int content_height = (std::max)(40, cb - content_top - 6);
-        MoveWindow(g_navband, cl + 6, 36 + toolbar_height, cr - cl - 12, band_height, TRUE);
+        MoveWindow(g_tabs, cl, toolbar_height, cr - cl, 25, TRUE);
+        constexpr int band_height = 16, content_top = toolbar_height + 26 + band_height + 2;
+        const int content_width = (std::max)(120, cr - cl);
+        const int content_height = (std::max)(40, cb - content_top);
+        MoveWindow(g_navband, cl, toolbar_height + 26, content_width, band_height, TRUE);
         InvalidateRect(g_navband, nullptr, FALSE);
-        MoveWindow(g_view, cl + 6, content_top, view_width_docked, content_height, TRUE);
-        MoveWindow(g_editor, cl + 6, content_top, cr - cl - 12, content_height, TRUE);
-        MoveWindow(g_minimap, cl + 12 + view_width_docked, content_top, minimap_width - 8, content_height, TRUE);
-        ShowWindow(g_minimap, dock_minimap ? SW_SHOW : SW_HIDE);
-        update_graph_scrollbars(g_view); InvalidateRect(g_minimap, nullptr, TRUE); return 0;
+        MoveWindow(g_view, cl, content_top, content_width, content_height, TRUE);
+        MoveWindow(g_editor, cl, content_top, content_width, content_height, TRUE);
+        update_graph_scrollbars(g_view); InvalidateRect(g_minimap, nullptr, FALSE); return 0;
     }
     case WM_INITMENUPOPUP: dock::update_menu(reinterpret_cast<HMENU>(wparam)); break;
     case WM_APP + 77: if (auto* panel = reinterpret_cast<dock::Panel*>(wparam)) dock::dock_to(*panel, static_cast<dock::Area>(lparam)); return 0;
