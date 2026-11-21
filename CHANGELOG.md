@@ -1,3 +1,12 @@
+## 3.4 — 38-tool MCP server, IDA-style debugger panels, PDB loader and Patch Manager
+
+- Expand the built-in Streamable HTTP MCP server from 25 to 38 `gandon_*` tools, adding Local Types (`gandon_list_types`, `gandon_define_type`, `gandon_set_prototype`), live debugger control (`gandon_dbg_status`, `gandon_dbg_regs`, `gandon_dbg_bp`, `gandon_dbg_step`, `gandon_dbg_read_mem`), Unicorn emulation (`gandon_emu_run`, `gandon_emu_regs`), PDB symbol loading (`gandon_load_pdb`), and patching (`gandon_list_patches`, `gandon_assemble_patch`).
+- Add IDA-style debugging workflow: `Debugger -> Attach to Process...` (filterable `TH32CS_SNAPPROCESS` process picker, `DebugActiveProcess`, `DebugSetProcessKillOnExit(FALSE)`, initial attach break), `Detach from Process` (restores `0xCC` breakpoints and IAT hooks cleanly before `DebugActiveProcessStop`), and 4 live dockable panels (`Registers` with red highlighting on changed values + double-click register edit, `Stack`, `Modules`, `Threads`).
+- Improve static analysis, decompiler and `Hex View-1`: propagate prototype pointer-argument struct fields (`a1->field`) in pseudocode, click/jump on symbols and addresses in `Pseudocode-A`, inline ASCII and UTF-16LE string comments (`; L"..."`), and `Hex View-1` context menu actions (`Patch Bytes at Cursor...`, `Copy as C Array`, `Copy as Python Bytes`, `Copy as AOB Signature`).
+- Add Windows PDB symbol loader (`dbghelp`, `File -> Load PDB Symbols...` and automatic loading of adjacent `<binary>.pdb`), built-in mini-FLIRT CRT prologue matcher, and an interactive `Patch Manager` dialog (`Edit -> Patch Manager...`) with Jump, Undo Last, `.1337` x64dbg export, and Apply to File.
+
+Validation: x64 Release GUI/CLI built with Capstone + Unicorn (`x86;aarch64`); CTest 5/5 passed (38-tool `gandon_mcp_tests`); `gandon_types_tests` passed.
+
 ## 3.3 — IDA Pro 9.5 UI overhaul and built-in MCP server
 
 - Overhaul the native Win32 workspace with the IDA Pro 9.5 dark theme, closeable view tabs (`×` + middle-click), 4-pane owner-drawn status bar, dockable Functions panel enabled by default, register/pseudocode highlighting, double-click/Enter operand navigation, and interactive popups for XREFs (`X` / `Ctrl+J`), bookmarks (`Ctrl+M`), and segments (`Ctrl+Alt+S`), plus standard shortcuts (`G`, `F5`, `Tab`, `Space`, `Esc`, `Home`).

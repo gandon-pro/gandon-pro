@@ -129,6 +129,7 @@ struct IdaViews::Impl {
     std::unordered_map<std::uint64_t, std::string> symbol_names;
     std::vector<StringEntry> string_table;
     std::map<std::uint64_t, std::size_t> string_by_address;
+    std::unordered_map<std::uint64_t, std::size_t> string_xref_from;
     std::map<std::uint64_t, int> data_hints;                // address -> element size
     std::set<std::uint64_t> marks;                          // layout boundaries for data walking
 
@@ -326,6 +327,10 @@ struct IdaViews::Impl {
         }
         scan_strings(5);
         for (const auto& s : string_table) { marks.insert(s.address); marks.insert(s.address + s.bytes); }
+        for (const auto& x : db.xrefs()) {
+            const auto sit = string_by_address.find(x.to);
+            if (sit != string_by_address.end()) string_xref_from.emplace(x.from, sit->second);
+        }
         for (const auto l : labels) marks.insert(l);
     }
 
@@ -597,8 +602,15 @@ struct IdaViews::Impl {
     }
 
     std::string comment_for(std::uint64_t a) const {
-        const auto it = cfg.user_comments.find(a);
-        return it == cfg.user_comments.end() ? std::string() : it->second;
+        if (const auto it = cfg.user_comments.find(a); it != cfg.user_comments.end() && !it->second.empty())
+            return it->second;
+        if (const auto sit = string_xref_from.find(a); sit != string_xref_from.end() && sit->second < string_table.size()) {
+            const auto& e = string_table[sit->second];
+            std::string preview = e.text;
+            if (preview.size() > 64) preview = preview.substr(0, 61) + "...";
+            return (e.wide ? "L\"" : "\"") + preview + "\"";
+        }
+        return {};
     }
 
     // ---------- xref comment text ----------

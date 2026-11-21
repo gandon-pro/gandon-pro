@@ -639,6 +639,105 @@ struct McpServer::Impl {
         return "{\"path\":\"" + json_escape(path) + "\",\"loaded\":true}";
     }
 
+    std::string tool_list_types(const JsonValue&) const {
+        return "{\"types\":\"" + json_escape(require_opt(cb.list_types ? cb.list_types() : std::nullopt, "types")) + "\"}";
+    }
+
+    std::string tool_define_type(const JsonValue& args) const {
+        const auto src = args.find("declaration") ? args.find("declaration")->as_string() : std::string();
+        if (src.empty()) throw ToolError("'declaration' (C struct/enum/typedef source) is required");
+        std::string error;
+        if (!cb.define_type || !cb.define_type(src, error))
+            throw ToolError("define_type failed: " + (error.empty() ? std::string("parse error") : error));
+        return "{\"defined\":true}";
+    }
+
+    std::string tool_set_prototype(const JsonValue& args) const {
+        const auto addr_text = args.find("address") ? args.find("address")->as_string() : std::string();
+        const auto proto = args.find("prototype") ? args.find("prototype")->as_string() : std::string();
+        const auto address = resolve_or_throw(addr_text);
+        std::string error;
+        if (!cb.set_prototype || !cb.set_prototype(address, proto, error))
+            throw ToolError("set_prototype failed: " + (error.empty() ? std::string("invalid prototype") : error));
+        return "{\"address\":\"" + hex_u64(address) + "\",\"prototype\":\"" + json_escape(proto) + "\"}";
+    }
+
+    std::string tool_dbg_status(const JsonValue&) const {
+        if (!cb.dbg_status_json) throw ToolError("debugger unavailable");
+        return cb.dbg_status_json();
+    }
+
+    std::string tool_dbg_regs(const JsonValue&) const {
+        if (!cb.dbg_regs_json) throw ToolError("debugger unavailable");
+        return require_opt(cb.dbg_regs_json(), "debugger registers (is a process paused?)");
+    }
+
+    std::string tool_dbg_bp(const JsonValue& args) const {
+        const auto addr_text = args.find("address") ? args.find("address")->as_string() : std::string();
+        const auto address = resolve_or_throw(addr_text);
+        const bool enable = !args.find("enable") || args.find("enable")->as_bool(true);
+        std::string error;
+        if (!cb.dbg_toggle_bp || !cb.dbg_toggle_bp(address, enable, error))
+            throw ToolError("dbg_bp failed: " + (error.empty() ? std::string("failed") : error));
+        return "{\"address\":\"" + hex_u64(address) + "\",\"enabled\":" + (enable ? "true" : "false") + "}";
+    }
+
+    std::string tool_dbg_step(const JsonValue& args) const {
+        const bool over = args.find("over") && args.find("over")->as_bool(false);
+        std::string error;
+        if (!cb.dbg_step || !cb.dbg_step(over, error))
+            throw ToolError("dbg_step failed: " + (error.empty() ? std::string("not paused") : error));
+        return std::string("{\"stepped\":true,\"mode\":\"") + (over ? "over" : "into") + "\"}";
+    }
+
+    std::string tool_dbg_read_mem(const JsonValue& args) const {
+        if (!cb.dbg_read_mem) throw ToolError("debugger memory unavailable");
+        const auto addr_text = args.find("address") ? args.find("address")->as_string() : std::string();
+        const auto address = resolve_or_throw(addr_text);
+        const auto size = args.find("size") ? static_cast<std::size_t>((std::max)(1LL, (std::min)(4096LL, args.find("size")->as_int(64)))) : 64;
+        const auto hex_str = require_opt(cb.dbg_read_mem(address, size), "debugger memory read");
+        return "{\"address\":\"" + hex_u64(address) + "\",\"size\":" + std::to_string(size) + ",\"hex\":\"" + json_escape(hex_str) + "\"}";
+    }
+
+    std::string tool_emu_run(const JsonValue& args) const {
+        if (!cb.emu_run_json) throw ToolError("emulator unavailable");
+        const auto addr_text = args.find("address") ? args.find("address")->as_string() : std::string();
+        const auto address = resolve_or_throw(addr_text);
+        const auto max_ins = args.find("max_instructions") ? static_cast<std::size_t>((std::max)(1LL, (std::min)(100000LL, args.find("max_instructions")->as_int(500)))) : 500;
+        return require_opt(cb.emu_run_json(address, max_ins), "emulator run");
+    }
+
+    std::string tool_emu_regs(const JsonValue&) const {
+        if (!cb.emu_regs_json) throw ToolError("emulator unavailable");
+        return require_opt(cb.emu_regs_json(), "emulator registers");
+    }
+
+    std::string tool_load_pdb(const JsonValue& args) const {
+        const auto path = args.find("path") ? args.find("path")->as_string() : std::string();
+        std::size_t count = 0;
+        std::string error;
+        if (!cb.load_pdb || !cb.load_pdb(path, count, error))
+            throw ToolError("load_pdb failed: " + (error.empty() ? std::string("could not load PDB") : error));
+        return "{\"loaded\":true,\"symbols\":" + std::to_string(count) + "}";
+    }
+
+    std::string tool_list_patches(const JsonValue&) const {
+        if (!cb.list_patches_json) throw ToolError("patch list unavailable");
+        return cb.list_patches_json();
+    }
+
+    std::string tool_assemble_patch(const JsonValue& args) const {
+        const auto addr_text = args.find("address") ? args.find("address")->as_string() : std::string();
+        const auto asm_text = args.find("assembly") ? args.find("assembly")->as_string() : std::string();
+        if (asm_text.empty()) throw ToolError("'assembly' is required (e.g. 'nop' or 'mov eax, 1')");
+        const auto address = resolve_or_throw(addr_text);
+        std::size_t written = 0;
+        std::string error;
+        if (!cb.assemble_patch || !cb.assemble_patch(address, asm_text, written, error))
+            throw ToolError("assemble_patch failed: " + (error.empty() ? std::string("assembly error") : error));
+        return "{\"address\":\"" + hex_u64(address) + "\",\"bytes_written\":" + std::to_string(written) + "}";
+    }
+
     std::string call_tool(const std::string& name, const JsonValue& args) {
         if (name == "gandon_info") return tool_info(args);
         if (name == "gandon_resolve_address") return tool_resolve(args);
@@ -665,6 +764,19 @@ struct McpServer::Impl {
         if (name == "gandon_navigate") return tool_navigate(args);
         if (name == "gandon_save_database") return tool_save_database(args);
         if (name == "gandon_load_database") return tool_load_database(args);
+        if (name == "gandon_list_types") return tool_list_types(args);
+        if (name == "gandon_define_type") return tool_define_type(args);
+        if (name == "gandon_set_prototype") return tool_set_prototype(args);
+        if (name == "gandon_dbg_status") return tool_dbg_status(args);
+        if (name == "gandon_dbg_regs") return tool_dbg_regs(args);
+        if (name == "gandon_dbg_bp") return tool_dbg_bp(args);
+        if (name == "gandon_dbg_step") return tool_dbg_step(args);
+        if (name == "gandon_dbg_read_mem") return tool_dbg_read_mem(args);
+        if (name == "gandon_emu_run") return tool_emu_run(args);
+        if (name == "gandon_emu_regs") return tool_emu_regs(args);
+        if (name == "gandon_load_pdb") return tool_load_pdb(args);
+        if (name == "gandon_list_patches") return tool_list_patches(args);
+        if (name == "gandon_assemble_patch") return tool_assemble_patch(args);
         throw ToolError("Unknown tool: " + name);
     }
 
@@ -697,7 +809,20 @@ struct McpServer::Impl {
             {"gandon_patch_bytes", "Patch bytes in the live session (space-separated hex, e.g. '90 90').", "{\"type\":\"object\",\"properties\":{\"address\":{\"type\":\"string\"},\"bytes\":{\"type\":\"string\"}},\"required\":[\"address\",\"bytes\"]}"},
             {"gandon_navigate", "Jump the GUI view to an address.", kAddrSchema},
             {"gandon_save_database", "Save the live session to a .gnd database file.", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}"},
-            {"gandon_load_database", "Load a .gnd database file into the live session.", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}"}
+            {"gandon_load_database", "Load a .gnd database file into the live session.", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}"},
+            {"gandon_list_types", "List all local C structs, unions, enums, and typedefs.", "{\"type\":\"object\",\"properties\":{}}"},
+            {"gandon_define_type", "Parse and add C struct/union/enum/typedef declarations to Local Types.", "{\"type\":\"object\",\"properties\":{\"declaration\":{\"type\":\"string\"}},\"required\":[\"declaration\"]}"},
+            {"gandon_set_prototype", "Set a C function prototype at an address (used for decompiler type propagation).", "{\"type\":\"object\",\"properties\":{\"address\":{\"type\":\"string\"},\"prototype\":{\"type\":\"string\"}},\"required\":[\"address\",\"prototype\"]}"},
+            {"gandon_dbg_status", "Return live Win32 debugger state (attached PID, thread ID, paused status, RIP).", "{\"type\":\"object\",\"properties\":{}}"},
+            {"gandon_dbg_regs", "Read live CPU registers from the active debugged thread.", "{\"type\":\"object\",\"properties\":{}}"},
+            {"gandon_dbg_bp", "Set or remove a software breakpoint at an address.", "{\"type\":\"object\",\"properties\":{\"address\":{\"type\":\"string\"},\"enable\":{\"type\":\"boolean\"}},\"required\":[\"address\"]}"},
+            {"gandon_dbg_step", "Single-step the paused debugged process (over:true for step-over).", "{\"type\":\"object\",\"properties\":{\"over\":{\"type\":\"boolean\"}}}"},
+            {"gandon_dbg_read_mem", "Read live process memory bytes as hex from the debugged process.", "{\"type\":\"object\",\"properties\":{\"address\":{\"type\":\"string\"},\"size\":{\"type\":\"integer\"}},\"required\":[\"address\"]}"},
+            {"gandon_emu_run", "Run Unicorn CPU emulation starting at an address for up to max_instructions.", "{\"type\":\"object\",\"properties\":{\"address\":{\"type\":\"string\"},\"max_instructions\":{\"type\":\"integer\"}},\"required\":[\"address\"]}"},
+            {"gandon_emu_regs", "Read current Unicorn emulator CPU registers.", "{\"type\":\"object\",\"properties\":{}}"},
+            {"gandon_load_pdb", "Load Windows PDB symbols (explicit path or auto-discovered adjacent .pdb).", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}}}"},
+            {"gandon_list_patches", "List all applied byte patches in the current session.", "{\"type\":\"object\",\"properties\":{}}"},
+            {"gandon_assemble_patch", "Assemble an instruction (e.g. 'nop', 'mov eax, 1') and patch it at an address.", "{\"type\":\"object\",\"properties\":{\"address\":{\"type\":\"string\"},\"assembly\":{\"type\":\"string\"}},\"required\":[\"address\",\"assembly\"]}"}
         };
         std::ostringstream out;
         out << '[';

@@ -688,6 +688,39 @@ AutoAnalysisReport run_auto_analysis(AnalysisDatabase& db, const AutoAnalysisOpt
         for (const auto& [start, name] : renames)
             if (db.rename_function(start, name)) { report.new_names[start] = name; ++report.functions_renamed; }
     }
+    // Built-in mini-FLIRT matcher for common MSVC x64/x86 CRT helper prologues.
+    {
+        struct BuiltinSig { const char* name; bool is_64; std::vector<std::optional<std::uint8_t>> bytes; };
+        static const BuiltinSig kBuiltinCrt[] = {
+            {"__security_check_cookie", true, {0x48, 0x3B, 0x0D, std::nullopt, std::nullopt, std::nullopt, std::nullopt, 0x75, std::nullopt, 0x48, 0xC1, 0xC1, 0x10}},
+            {"__security_check_cookie", false, {0x3B, 0x0D, std::nullopt, std::nullopt, std::nullopt, std::nullopt, 0x75, std::nullopt, 0xF3, 0xC3}},
+            {"__chkstk", true, {0x48, 0x83, 0xEC, 0x10, 0x4C, 0x89, 0x14, 0x24, 0x4C, 0x89, 0x5C, 0x24, 0x08}},
+            {"_chkstk", false, {0x51, 0x3D, 0x00, 0x10, 0x00, 0x00, 0x8D, 0x4C, 0x24, 0x08}},
+            {"__GSHandlerCheck", true, {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x49, 0x8B, 0x41}},
+            {"__CxxFrameHandler3", true, {0x48, 0x89, 0x4C, 0x24, 0x08, 0x48, 0x83, 0xEC, 0x38, 0x48, 0x8B, 0x05}},
+            {"_CxxThrowException", true, {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x60, 0x48, 0x8B, 0xFA}},
+            {"memset", true, {0x4C, 0x8B, 0xD9, 0x0F, 0xB6, 0xD2, 0x49, 0xB8, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01}},
+            {"strlen", true, {0x48, 0x8B, 0xC1, 0x48, 0xF7, 0xD0, 0x48, 0x83, 0xE0, 0x07}},
+        };
+        std::vector<std::pair<std::uint64_t, std::string>> crt_renames;
+        for (const auto& f : db.functions()) {
+            if (f.name.rfind("sub_", 0) != 0) continue;
+            const auto off = image.va_to_file_offset(f.start);
+            if (!off) continue;
+            for (const auto& sig : kBuiltinCrt) {
+                if (sig.is_64 != image.is_64_bit) continue;
+                if (*off + sig.bytes.size() > image.bytes.size()) continue;
+                bool ok = true;
+                for (std::size_t i = 0; i < sig.bytes.size(); ++i) {
+                    if (sig.bytes[i] && image.bytes[*off + i] != *sig.bytes[i]) { ok = false; break; }
+                }
+                if (ok) { crt_renames.push_back({f.start, sig.name}); break; }
+            }
+        }
+        for (const auto& [start, name] : crt_renames) {
+            if (db.rename_function(start, name)) { report.new_names[start] = name; ++report.functions_renamed; }
+        }
+    }
     report.log.push_back("names: " + std::to_string(report.import_thunks) + " import thunk(s), " + std::to_string(report.functions_renamed) + " signature match(es)");
 
     // ---- 3. noreturn propagation

@@ -123,6 +123,24 @@ int main() {
         renamed_called = (addr == 0x140001100ull && name == "entry_fn");
         return renamed_called;
     };
+    bool type_defined = false;
+    cb.list_types = []() -> std::optional<std::string> { return std::string("struct Player { int hp; };"); };
+    cb.define_type = [&](const std::string& decl, std::string&) -> bool {
+        type_defined = (decl.find("struct Enemy") != std::string::npos);
+        return type_defined;
+    };
+    cb.dbg_status_json = []() -> std::string { return "{\"running\":false,\"paused\":false,\"pid\":0}"; };
+    cb.emu_run_json = [](std::uint64_t, std::size_t) -> std::optional<std::string> {
+        return std::string("{\"stop\":\"returned\",\"instructions\":12}");
+    };
+    cb.load_pdb = [](const std::string&, std::size_t& count, std::string&) -> bool {
+        count = 42;
+        return true;
+    };
+    cb.assemble_patch = [](std::uint64_t, const std::string& asm_text, std::size_t& written, std::string&) -> bool {
+        written = (asm_text == "nop") ? 1 : 0;
+        return written > 0;
+    };
 
     gandon::McpServer server;
     server.set_callbacks(cb);
@@ -159,12 +177,12 @@ int main() {
     assert(init.headers.find("Mcp-Session-Id:") != std::string::npos);
     assert(init.body.find("2025-03-26") != std::string::npos);
 
-    // 5. tools/list must expose all 25 gandon_* tools
+    // 5. tools/list must expose all 38 gandon_* tools
     const auto list_body = post_json(kTestPort, "/mcp",
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}");
-    assert(count_occurrences(list_body, "\"name\":\"gandon_") == 25);
+    assert(count_occurrences(list_body, "\"name\":\"gandon_") == 38);
 
-    // 6. tools/call gandon_info and gandon_rename via callbacks
+    // 6. tools/call gandon_info, gandon_rename, and new type/dbg/emu/pdb/patch tools
     const auto info_body = post_json(kTestPort, "/mcp",
         "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\","
         "\"params\":{\"name\":\"gandon_info\",\"arguments\":{}}}");
@@ -176,6 +194,32 @@ int main() {
         "\"params\":{\"name\":\"gandon_rename\",\"arguments\":{\"address\":\"main\",\"name\":\"entry_fn\"}}}");
     assert(renamed_called);
     assert(ren_body.find("entry_fn") != std::string::npos);
+
+    const auto def_body = post_json(kTestPort, "/mcp",
+        "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\","
+        "\"params\":{\"name\":\"gandon_define_type\",\"arguments\":{\"declaration\":\"struct Enemy { int hp; };\"}}}");
+    assert(type_defined);
+    assert(def_body.find("defined") != std::string::npos);
+
+    const auto dbg_body = post_json(kTestPort, "/mcp",
+        "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\","
+        "\"params\":{\"name\":\"gandon_dbg_status\",\"arguments\":{}}}");
+    assert(dbg_body.find("paused") != std::string::npos);
+
+    const auto emu_body = post_json(kTestPort, "/mcp",
+        "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\","
+        "\"params\":{\"name\":\"gandon_emu_run\",\"arguments\":{\"address\":\"main\",\"max_instructions\":100}}}");
+    assert(emu_body.find("returned") != std::string::npos);
+
+    const auto pdb_body = post_json(kTestPort, "/mcp",
+        "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"tools/call\","
+        "\"params\":{\"name\":\"gandon_load_pdb\",\"arguments\":{}}}");
+    assert(pdb_body.find("42") != std::string::npos);
+
+    const auto asm_body = post_json(kTestPort, "/mcp",
+        "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\","
+        "\"params\":{\"name\":\"gandon_assemble_patch\",\"arguments\":{\"address\":\"main\",\"assembly\":\"nop\"}}}");
+    assert(asm_body.find("bytes_written") != std::string::npos);
 
     // 7. Batch JSON-RPC request
     const auto batch_body = post_json(kTestPort, "/",
@@ -206,6 +250,6 @@ int main() {
 
     server.stop();
     WSACleanup();
-    std::cout << "mcp_server tests passed (25 tools, HTTP/1.1, batch, auth, clean stop)\n";
+    std::cout << "mcp_server tests passed (38 tools, HTTP/1.1, batch, auth, clean stop)\n";
     return 0;
 }

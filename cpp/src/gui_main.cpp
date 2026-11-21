@@ -13,6 +13,7 @@
 #include "gandon/live_process.hpp"
 #include "gandon/driver_setup.hpp"
 #include "gandon/mcp_server.hpp"
+#include "gandon/pdb_loader.hpp"
 
 #include <windows.h>
 #include <tlhelp32.h>
@@ -82,6 +83,8 @@ constexpr int ID_TOGGLE_GRAPH_LIST = 1436, ID_FIT_GRAPH = 1437, ID_TOGGLE_MINIMA
 constexpr int ID_SWITCH_PSEUDO_DISASM = 1438, ID_BOOKMARKS_POPUP = 1439, ID_JUMP_SEGMENT = 1440, ID_SEARCH_BYTES = 1441;
 constexpr int ID_FOLLOW_CURSOR_ENTER = 1442;
 constexpr int ID_MCP_TOGGLE = 1480, ID_MCP_CONFIG = 1481, ID_MCP_COPY_URL = 1482, ID_MCP_COPY_CONFIG = 1483, ID_MCP_STATUS = 1484;
+constexpr int ID_LOAD_PDB = 1485, ID_PATCH_MANAGER = 1486, ID_DBG_ATTACH = 1487, ID_DBG_DETACH = 1488;
+constexpr int ID_HEX_PATCH = 1489, ID_HEX_COPY_C = 1490, ID_HEX_COPY_PY = 1491, ID_HEX_COPY_AOB = 1492;
 constexpr int ID_PATHFINDER = 1376;
 constexpr int ID_EMULATE = 1377, ID_EMULATE_STEP = 1378, ID_EMULATE_RESET = 1379;
 constexpr int ID_EMULATE_BREAKPOINT = 1381;
@@ -269,6 +272,7 @@ std::atomic<DWORD> g_debug_pid{0};
 std::atomic<DWORD> g_debug_thread{0};
 std::atomic<std::uint64_t> g_debug_base{0};
 std::atomic_bool g_debug_starting{false};
+std::atomic_bool g_debug_detach_requested{false};
 std::atomic_bool g_stealth_applied{false};
 enum class DebugResumeMode { None, Continue, StepInto, StepOver };
 std::mutex g_debug_control_mutex;
@@ -358,6 +362,21 @@ void mcp_copy_url(HWND window);
 void mcp_copy_client_config(HWND window);
 void mcp_show_status(HWND window);
 namespace dock { void toggle(const std::wstring& id); bool is_visible(const std::wstring& id); }
+bool load_pdb_symbols_ui(HWND window, const std::filesystem::path& explicit_pdb = {}, bool silent = false, std::size_t* out_count = nullptr, std::string* out_error = nullptr);
+void show_patch_manager(HWND window);
+void hex_patch_at_cursor(HWND window);
+void hex_copy_as(HWND window, int format);
+void attach_debugger(HWND window);
+void detach_debugger(HWND window);
+HWND dbg_regs_create(HWND parent);
+HWND dbg_stack_create(HWND parent);
+HWND dbg_modules_create(HWND parent);
+HWND dbg_threads_create(HWND parent);
+void dbg_panels_refresh();
+bool read_debug_context(CONTEXT& context, HANDLE& thread);
+void finish_debug_context(HANDLE thread);
+void step_debugger(HWND window, bool over);
+bool assemble_bytes_for_patch(std::uint64_t address, const std::string& asm_text, std::vector<std::uint8_t>& out, std::string& error);
 void py_console_log(const std::wstring& text);
 void py_console_log_command(int id);
 void functions_window(HWND owner);
@@ -3107,6 +3126,232 @@ gandon::McpHostCallbacks mcp_build_callbacks() {
         });
         return ok;
     };
+    cb.list_types = []() -> std::optional<std::string> {
+        std::optional<std::string> res;
+        run_on_ui_thread([&] {
+            const bool is64 = !g_database || g_database->image().is_64_bit;
+            ensure_types(is64);
+            res = g_types.format();
+        });
+        return res;
+    };
+    cb.define_type = [](const std::string& c_source, std::string& err) -> bool {
+        bool ok = false;
+        run_on_ui_thread([&] {
+            const bool is64 = !g_database || g_database->image().is_64_bit;
+            gandon::TypeLibrary probe(is64 ? 8 : 4);
+            std::string ignored; probe.parse(gandon::default_type_declarations(), ignored);
+            probe.parse(g_type_source, ignored);
+            std::string perr;
+            if (!probe.parse(c_source, perr)) { err = perr.empty() ? "type parse error" : perr; return; }
+            if (!g_type_source.empty() && g_type_source.back() != '\n') g_type_source.push_back('\n');
+            g_type_source += c_source;
+            reload_type_library(is64);
+            g_session_dirty = true;
+            if (g_main_window) refresh_views(g_main_window);
+            ok = true;
+        });
+        return ok;
+    };
+    cb.set_prototype = [](std::uint64_t address, const std::string& proto_text, std::string& err) -> bool {
+        bool ok = false;
+        run_on_ui_thread([&] {
+            if (!g_database || !address) { err = "no binary open"; return; }
+            const auto parsed = gandon::parse_prototype(proto_text);
+            if (!parsed) { err = "invalid C prototype syntax"; return; }
+            std::uint64_t target = address;
+            if (const auto fn = g_database->function_at(address)) target = fn->get().start;
+            g_prototypes[target] = parsed->text();
+            if (!parsed->name.empty()) {
+                g_custom_labels[target] = wide(parsed->name);
+                g_database->rename_function(target, parsed->name);
+            }
+            ++g_types_version;
+            g_session_dirty = true;
+            if (g_main_window) refresh_views(g_main_window);
+            ok = true;
+        });
+        return ok;
+    };
+    cb.dbg_status_json = []() -> std::string {
+        std::ostringstream o;
+        o << "{\"running\":" << (g_debug_process.load() ? "true" : "false")
+          << ",\"pid\":" << g_debug_pid.load()
+          << ",\"thread_id\":" << g_debug_thread.load()
+          << ",\"paused\":" << (g_debug_paused.load() ? "true" : "false")
+          << ",\"pause_address\":\"0x" << std::hex << std::uppercase << g_debug_pause_address.load() << "\""
+          << ",\"base\":\"0x" << g_debug_base.load() << "\"}";
+        return o.str();
+    };
+    cb.dbg_regs_json = []() -> std::optional<std::string> {
+        if (!g_debug_process.load()) return std::nullopt;
+        CONTEXT ctx{}; HANDLE th{};
+        if (!read_debug_context(ctx, th)) return std::nullopt;
+        finish_debug_context(th);
+        std::ostringstream o;
+        o << std::hex << std::uppercase << "{";
+#if defined(_M_AMD64)
+        const std::pair<const char*, std::uint64_t> regs[] = {
+            {"rip", ctx.Rip}, {"rax", ctx.Rax}, {"rbx", ctx.Rbx}, {"rcx", ctx.Rcx},
+            {"rdx", ctx.Rdx}, {"rsi", ctx.Rsi}, {"rdi", ctx.Rdi}, {"rbp", ctx.Rbp},
+            {"rsp", ctx.Rsp}, {"r8", ctx.R8}, {"r9", ctx.R9}, {"r10", ctx.R10},
+            {"r11", ctx.R11}, {"r12", ctx.R12}, {"r13", ctx.R13}, {"r14", ctx.R14},
+            {"r15", ctx.R15}, {"eflags", ctx.EFlags}
+        };
+        for (std::size_t i = 0; i < std::size(regs); ++i) {
+            if (i) o << ",";
+            o << "\"" << regs[i].first << "\":\"0x" << regs[i].second << "\"";
+        }
+#endif
+        o << "}";
+        return o.str();
+    };
+    cb.dbg_toggle_bp = [](std::uint64_t address, bool enable, std::string& err) -> bool {
+        if (!address) { err = "invalid address"; return false; }
+        run_on_ui_thread([&] {
+            {
+                std::lock_guard lock(g_breakpoint_mutex);
+                if (enable) g_requested_breakpoints.insert(address);
+                else g_requested_breakpoints.erase(address);
+            }
+            if (g_main_window) InvalidateRect(g_view, nullptr, FALSE);
+        });
+        return true;
+    };
+    cb.dbg_step = [](bool step_over, std::string& err) -> bool {
+        bool ok = false;
+        run_on_ui_thread([&] {
+            if (!g_debug_process.load()) { err = "no active debug process"; return; }
+            if (!g_debug_paused.load()) { err = "debug process is not paused"; return; }
+            step_debugger(g_main_window, step_over);
+            ok = true;
+        });
+        return ok;
+    };
+    cb.dbg_read_mem = [](std::uint64_t address, std::size_t size) -> std::optional<std::string> {
+        HANDLE proc = g_debug_process.load();
+        if (!proc || !address || size == 0) return std::nullopt;
+        const std::size_t cap = (std::min)(size, static_cast<std::size_t>(4096));
+        std::vector<std::uint8_t> buf(cap);
+        SIZE_T got = 0;
+        if (!ReadProcessMemory(proc, reinterpret_cast<LPCVOID>(address), buf.data(), cap, &got) || got == 0) return std::nullopt;
+        static const char kHex[] = "0123456789ABCDEF";
+        std::string hex; hex.reserve(got * 2);
+        for (SIZE_T i = 0; i < got; ++i) { hex.push_back(kHex[buf[i] >> 4]); hex.push_back(kHex[buf[i] & 0xF]); }
+        return hex;
+    };
+    cb.emu_run_json = [](std::uint64_t address, std::size_t max_ins) -> std::optional<std::string> {
+        std::optional<std::string> res;
+        run_on_ui_thread([&] {
+            if (!g_database) return;
+            if (!g_emulator || !g_emulator->ready()) g_emulator = std::make_unique<gandon::Emulator>(g_database->image());
+            if (!g_emulator->ready()) {
+                res = std::string("{\"ok\":false,\"error\":\"") + g_emulator->error() + "\"}";
+                return;
+            }
+            std::string reg_err;
+            const std::uint64_t start = address ? address : (g_current_address ? g_current_address : g_database->image().entry_point);
+            if (g_database->image().architecture == gandon::MachineArchitecture::ARM64) g_emulator->set_register("pc", start, reg_err);
+            else if (g_database->image().is_64_bit) g_emulator->set_register("rip", start, reg_err);
+            else g_emulator->set_register("eip", start, reg_err);
+            const auto r = g_emulator->run(max_ins ? max_ins : 10000);
+            const char* stop_name = "error";
+            switch (r.stop) {
+                case gandon::EmulationStop::Paused: stop_name = "paused"; break;
+                case gandon::EmulationStop::Returned: stop_name = "returned"; break;
+                case gandon::EmulationStop::Exited: stop_name = "exited"; break;
+                case gandon::EmulationStop::Breakpoint: stop_name = "breakpoint"; break;
+                case gandon::EmulationStop::Watchpoint: stop_name = "watchpoint"; break;
+                case gandon::EmulationStop::InstructionLimit: stop_name = "instruction_limit"; break;
+                case gandon::EmulationStop::TimedOut: stop_name = "timed_out"; break;
+                case gandon::EmulationStop::MemoryFault: stop_name = "memory_fault"; break;
+                default: stop_name = "error"; break;
+            }
+            std::ostringstream o;
+            o << "{\"ok\":true,\"stop\":\"" << stop_name << "\",\"instructions_executed\":" << r.instructions_executed
+              << ",\"pc\":\"0x" << std::hex << std::uppercase << r.program_counter << "\"}";
+            res = o.str();
+        });
+        return res;
+    };
+    cb.emu_regs_json = []() -> std::optional<std::string> {
+        std::optional<std::string> res;
+        run_on_ui_thread([&] {
+            if (!g_emulator || !g_emulator->ready()) return;
+            const bool arm64 = g_database && g_database->image().architecture == gandon::MachineArchitecture::ARM64;
+            const std::vector<const char*> names = arm64
+                ? std::vector<const char*>{"pc","sp","x0","x1","x2","x3","x4","x5","x6","x7","x29","x30"}
+                : std::vector<const char*>{"rip","rax","rbx","rcx","rdx","rsi","rdi","rbp","rsp","r8","r9","r10","r11","r12","r13","r14","r15","eflags"};
+            std::ostringstream o; o << "{";
+            bool first = true;
+            for (const char* n : names) {
+                std::uint64_t val = 0; std::string e;
+                if (!g_emulator->register_value(n, val, e)) continue;
+                if (!first) o << ",";
+                first = false;
+                o << "\"" << n << "\":\"0x" << std::hex << std::uppercase << val << "\"";
+            }
+            o << "}";
+            res = o.str();
+        });
+        return res;
+    };
+    cb.load_pdb = [](const std::string& pdb_path, std::size_t& loaded_count, std::string& err) -> bool {
+        bool ok = false;
+        run_on_ui_thread([&] {
+            ok = load_pdb_symbols_ui(g_main_window, pdb_path.empty() ? std::filesystem::path{} : std::filesystem::path(wide(pdb_path)), true, &loaded_count, &err);
+            if (ok && g_main_window) refresh_views(g_main_window);
+        });
+        return ok;
+    };
+    cb.list_patches_json = []() -> std::string {
+        std::string out = "[]";
+        run_on_ui_thread([&] {
+            std::ostringstream o; o << "[";
+            static const char kHex[] = "0123456789ABCDEF";
+            for (std::size_t i = 0; i < g_patch_undo.size(); ++i) {
+                const auto& grp = g_patch_undo[i];
+                if (grp.empty()) continue;
+                if (i) o << ",";
+                std::string old_h, new_h;
+                for (const auto& c : grp) {
+                    old_h.push_back(kHex[c.old_value >> 4]); old_h.push_back(kHex[c.old_value & 0xF]);
+                    new_h.push_back(kHex[c.new_value >> 4]); new_h.push_back(kHex[c.new_value & 0xF]);
+                }
+                o << "{\"index\":" << i << ",\"file_offset\":\"0x" << std::hex << std::uppercase << grp.front().offset
+                  << "\",\"size\":" << std::dec << grp.size()
+                  << ",\"old_hex\":\"" << old_h << "\",\"new_hex\":\"" << new_h << "\"}";
+            }
+            o << "]";
+            out = o.str();
+        });
+        return out;
+    };
+    cb.assemble_patch = [](std::uint64_t address, const std::string& asm_text, std::size_t& bytes_written, std::string& err) -> bool {
+        bool ok = false;
+        run_on_ui_thread([&] {
+            if (!g_database || !address) { err = "no binary open"; return; }
+            std::vector<std::uint8_t> bytes;
+            if (!assemble_bytes_for_patch(address, asm_text, bytes, err) || bytes.empty()) return;
+            const auto offset = g_database->image().va_to_file_offset(address);
+            if (!offset) { err = "address not mapped to file"; return; }
+            std::vector<std::uint8_t> original;
+            if (!g_database->patch_bytes(address, bytes, original, err)) return;
+            std::vector<PatchChange> changes;
+            for (std::size_t i = 0; i < bytes.size(); ++i)
+                if (bytes[i] != original[i]) changes.push_back({*offset + i, original[i], bytes[i]});
+            if (!changes.empty()) {
+                g_patch_undo.push_back(std::move(changes));
+                g_patch_redo.clear();
+                g_timeline.push_back('p');
+                g_timeline_redo.clear();
+            }
+            bytes_written = bytes.size();
+            refresh_after_patch(g_main_window);
+            ok = true;
+        });
+        return ok;
+    };
     return cb;
 }
 
@@ -3322,6 +3567,44 @@ std::wstring pseudocode_text_at(const gandon::AnalysisDatabase& db, std::uint64_
                     }
                     if (line_end == std::string::npos) break;
                     line_start = line_end + 1;
+                }
+                // Type propagation: rewrite pointer parameter offsets (e.g. *(int*)(a1 + 0x10) -> a1->hp)
+                if (const auto parsed = gandon::parse_prototype(proto->second)) {
+                    ensure_types(db.image().is_64_bit);
+                    for (std::size_t pi = 0; pi < parsed->arguments.size(); ++pi) {
+                        const auto& [raw_type, raw_name] = parsed->arguments[pi];
+                        const std::string param_alias = "a" + std::to_string(pi + 1);
+                        const std::string display_name = raw_name.empty() ? param_alias : raw_name;
+                        if (raw_type.find('*') != std::string::npos) {
+                            std::string base = raw_type;
+                            for (const char* kw : {"const ", "struct ", "class ", "volatile "}) {
+                                for (std::size_t pos; (pos = base.find(kw)) != std::string::npos;) base.erase(pos, std::strlen(kw));
+                            }
+                            base.erase(std::remove_if(base.begin(), base.end(), [](unsigned char c) { return c == '*' || std::isspace(c); }), base.end());
+                            if (!base.empty() && g_types.resolve(base)) {
+                                auto rewrite_for = [&](const std::string& var) {
+                                    // Match *(type *)(var + 0xNN) or *(type *)(var + NN)
+                                    try {
+                                        std::regex ptr_re(R"(\*\s*\([^)]+\*\)\s*\(\s*)" + var + R"(\s*\+\s*(0x[0-9a-fA-F]+|\d+)\s*\))");
+                                        std::string out_s;
+                                        std::sregex_iterator it(body.begin(), body.end(), ptr_re), end;
+                                        std::size_t last = 0;
+                                        for (; it != end; ++it) {
+                                            out_s.append(body, last, static_cast<std::size_t>((*it).position()) - last);
+                                            const auto off = std::strtoull((*it)[1].str().c_str(), nullptr, 0);
+                                            const auto field = g_types.field_at(base, off);
+                                            if (!field.empty()) out_s += display_name + "->" + field;
+                                            else out_s += (*it)[0].str();
+                                            last = static_cast<std::size_t>((*it).position() + (*it).length());
+                                        }
+                                        if (last > 0) { out_s.append(body, last, std::string::npos); body = std::move(out_s); }
+                                    } catch (...) {}
+                                };
+                                rewrite_for(param_alias);
+                                if (display_name != param_alias) rewrite_for(display_name);
+                            }
+                        }
+                    }
                 }
             }
             for (const char c : body) { if (c == '\n') text += L"\r\n"; else text.push_back(static_cast<unsigned char>(c)); }
@@ -4671,6 +4954,49 @@ void release_analysis_state_for_replacement() {
     }
 }
 
+bool load_pdb_symbols_ui(HWND window, const std::filesystem::path& explicit_pdb, bool silent, std::size_t* out_count, std::string* out_error) {
+    if (!g_database) {
+        if (out_error) *out_error = "no binary open";
+        if (!silent) MessageBoxW(window, L"Сначала открой исполняемый файл.", L"Load PDB", MB_ICONINFORMATION);
+        return false;
+    }
+    std::filesystem::path pdb_path = explicit_pdb;
+    if (pdb_path.empty() && !silent) {
+        wchar_t file_name[MAX_PATH]{};
+        OPENFILENAMEW dialog{sizeof(dialog)};
+        dialog.hwndOwner = window;
+        dialog.lpstrFilter = L"Program Database (*.pdb)\0*.pdb\0All files (*.*)\0*.*\0";
+        dialog.lpstrFile = file_name;
+        dialog.nMaxFile = MAX_PATH;
+        dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+        if (!GetOpenFileNameW(&dialog)) return false;
+        pdb_path = file_name;
+    }
+    std::vector<gandon::PdbSymbol> syms;
+    std::string err;
+    if (!gandon::load_pdb_symbols(g_database->image().path, g_database->image().image_base, pdb_path, syms, err)) {
+        if (out_error) *out_error = err;
+        if (!silent) MessageBoxW(window, wide(err.empty() ? "Не удалось загрузить PDB." : err).c_str(), L"Load PDB", MB_ICONWARNING);
+        return false;
+    }
+    for (const auto& sym : syms) {
+        if (sym.name.empty() || !sym.address) continue;
+        g_custom_labels[sym.address] = wide(sym.name);
+        g_database->rename_function(sym.address, sym.name);
+    }
+    if (out_count) *out_count = syms.size();
+    g_session_dirty = !syms.empty() || g_session_dirty;
+    fill_tree();
+    if (!silent) refresh_views(window);
+    std::wostringstream msg;
+    msg << L"[pdb] Loaded " << syms.size() << L" symbols";
+    if (!pdb_path.empty()) msg << L" from " << pdb_path.filename().wstring();
+    output_log(msg.str());
+    if (g_status) SetWindowTextW(g_status, (L"PDB: loaded " + std::to_wstring(syms.size()) + L" symbols.").c_str());
+    if (!silent) MessageBoxW(window, (L"Загружено PDB символов: " + std::to_wstring(syms.size())).c_str(), L"Load PDB Symbols", MB_ICONINFORMATION);
+    return true;
+}
+
 bool load_binary_path(HWND window, const std::filesystem::path& file_path) {
     gandon::BinaryImage image; std::string error;
     try {
@@ -4706,6 +5032,12 @@ bool load_binary_path(HWND window, const std::filesystem::path& file_path) {
 
     g_current_address = g_database->image().entry_point;
     g_session_path = g_database->image().path.wstring() + L".gnd";
+    {
+        auto adj = g_database->image().path;
+        adj.replace_extension(L".pdb");
+        std::error_code ec;
+        if (std::filesystem::exists(adj, ec)) load_pdb_symbols_ui(window, adj, true);
+    }
     g_session_dirty = false;
     refresh_views(window);
     return true;
@@ -5706,8 +6038,53 @@ std::wstring disasm_line_preview(std::uint64_t va) {
     return {};
 }
 
+std::optional<std::uint64_t> pseudocode_token_address(HWND editor) {
+    if (!editor || !g_database) return std::nullopt;
+    DWORD sel_start = 0, sel_end = 0;
+    SendMessageW(editor, EM_GETSEL, reinterpret_cast<WPARAM>(&sel_start), reinterpret_cast<LPARAM>(&sel_end));
+    const int line_idx = static_cast<int>(SendMessageW(editor, EM_LINEFROMCHAR, sel_start, 0));
+    const int line_char = static_cast<int>(SendMessageW(editor, EM_LINEINDEX, line_idx, 0));
+    const int line_len = static_cast<int>(SendMessageW(editor, EM_LINELENGTH, line_char, 0));
+    if (line_len <= 0 || line_len > 2048) return std::nullopt;
+    std::wstring buf(static_cast<std::size_t>(line_len) + 2, L'\0');
+    buf[0] = static_cast<wchar_t>(line_len + 1);
+    const int copied = static_cast<int>(SendMessageW(editor, EM_GETLINE, line_idx, reinterpret_cast<LPARAM>(buf.data())));
+    if (copied <= 0) return std::nullopt;
+    buf.resize(static_cast<std::size_t>(copied));
+    const int col = (std::max)(0, (std::min)(copied - 1, static_cast<int>(sel_start) - line_char));
+    auto is_ident = [](wchar_t c) { return std::iswalnum(c) || c == L'_'; };
+    int b = col, e = col;
+    while (b > 0 && is_ident(buf[static_cast<std::size_t>(b - 1)])) --b;
+    while (e < copied && is_ident(buf[static_cast<std::size_t>(e)])) ++e;
+    if (e > b) {
+        const std::wstring tok = buf.substr(static_cast<std::size_t>(b), static_cast<std::size_t>(e - b));
+        if (tok.rfind(L"sub_", 0) == 0 && tok.size() > 4) {
+            try { return std::stoull(tok.substr(4), nullptr, 16); } catch (...) {}
+        }
+        if (tok.rfind(L"loc_", 0) == 0 && tok.size() > 4) {
+            try { return std::stoull(tok.substr(4), nullptr, 16); } catch (...) {}
+        }
+        if ((tok.rfind(L"0x", 0) == 0 || tok.rfind(L"0X", 0) == 0) && tok.size() > 2) {
+            try {
+                const auto v = std::stoull(tok, nullptr, 16);
+                if (g_database->image().va_to_file_offset(v)) return v;
+            } catch (...) {}
+        }
+        for (const auto& [addr, lbl] : g_custom_labels) if (lbl == tok) return addr;
+        const std::string narrow_tok = utf8_from_wide(tok);
+        for (const auto& fn : g_database->functions()) if (fn.name == narrow_tok) return fn.start;
+    }
+    return editor_line_address(editor);
+}
+
 void follow_operand_at_cursor(HWND window) {
     if (!g_database) return;
+    if (active_view_kind() == ViewKind::Pseudocode && g_editor) {
+        if (const auto addr = pseudocode_token_address(g_editor)) {
+            navigate_to_address(window, *addr, g_view_a_graph_mode ? 0 : 1);
+            return;
+        }
+    }
     if (!is_graph_view_active() && active_view_kind() != ViewKind::ViewA) {
         if (const auto addr = editor_line_address(g_editor)) {
             navigate_to_address(window, *addr, g_view_a_graph_mode ? 0 : 1);
@@ -6563,6 +6940,226 @@ bool apply_semantic_patch(HWND window, std::uint64_t address, const std::vector<
     g_patch_undo.push_back(std::move(changes)); g_patch_redo.clear(); g_timeline.push_back('p'); g_timeline_redo.clear();
     refresh_after_patch(window); SetWindowTextW(g_status, ok_status);
     return true;
+}
+
+bool assemble_bytes_for_patch(std::uint64_t address, const std::string& asm_text, std::vector<std::uint8_t>& out, std::string& error) {
+    out.clear();
+    const std::wstring wtext = wide(asm_text);
+    if (builtin_asm::raw_bytes(wtext, out)) return true;
+    const bool arm64 = g_database && g_database->image().architecture == gandon::MachineArchitecture::ARM64;
+    const bool is64 = !g_database || g_database->image().is_64_bit;
+    const std::string normalized = builtin_asm::squeeze(wtext);
+    out = arm64 ? builtin_asm::arm64(normalized, address, error) : builtin_asm::x86(normalized, address, is64, error);
+    if (!out.empty()) return true;
+    if (!arm64) out = assemble_with_keystone(wtext, address, is64, error);
+    return !out.empty();
+}
+
+std::uint64_t file_offset_to_va(std::size_t offset) {
+    if (!g_database) return 0;
+    const auto& img = g_database->image();
+    for (const auto& s : img.sections) {
+        if (offset >= s.raw_offset && offset < static_cast<std::size_t>(s.raw_offset) + s.raw_size) {
+            return img.rva_to_va(s.rva + (offset - s.raw_offset));
+        }
+    }
+    return img.image_base + offset;
+}
+
+void show_patch_manager(HWND window) {
+    if (!g_database) { MessageBoxW(window, L"Сначала открой файл.", L"Patch Manager", MB_ICONINFORMATION); return; }
+    struct Row { std::size_t idx{}; std::size_t off{}; std::uint64_t va{}; std::wstring idx_s, loc_s, bytes_s; };
+    struct State { HWND owner{}, list{}; std::vector<Row> rows; } st{window};
+    auto fill_rows = [](State* s) {
+        s->rows.clear();
+        for (std::size_t i = 0; i < g_patch_undo.size(); ++i) {
+            const auto& grp = g_patch_undo[i];
+            if (grp.empty()) continue;
+            const auto off = grp.front().offset;
+            const auto va = file_offset_to_va(off);
+            wchar_t ib[24]{}, lb[64]{};
+            swprintf_s(ib, L"#%zu (%zuB)", i + 1, grp.size());
+            swprintf_s(lb, L"0x%llX  (off 0x%zX)", static_cast<unsigned long long>(va), off);
+            std::wstring oh, nh;
+            for (std::size_t k = 0; k < grp.size() && k < 16; ++k) {
+                wchar_t b1[8]{}, b2[8]{};
+                swprintf_s(b1, k ? L" %02X" : L"%02X", grp[k].old_value);
+                swprintf_s(b2, k ? L" %02X" : L"%02X", grp[k].new_value);
+                oh += b1; nh += b2;
+            }
+            if (grp.size() > 16) { oh += L"..."; nh += L"..."; }
+            s->rows.push_back({i, off, va, ib, lb, oh + L"  ->  " + nh});
+        }
+        if (s->list) {
+            ListView_SetItemCountEx(s->list, static_cast<int>(s->rows.size()), LVSICF_NOINVALIDATEALL);
+            if (!s->rows.empty()) ListView_SetItemState(s->list, 0, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+            InvalidateRect(s->list, nullptr, TRUE);
+        }
+    };
+    fill_rows(&st);
+    auto proc = [](HWND dlg, UINT msg, WPARAM wp, LPARAM lp) -> INT_PTR {
+        auto* s = reinterpret_cast<State*>(GetWindowLongPtrW(dlg, DWLP_USER));
+        auto rebuild_list = [&]() {
+            if (!s || !s->list) return;
+            s->rows.clear();
+            for (std::size_t i = 0; i < g_patch_undo.size(); ++i) {
+                const auto& grp = g_patch_undo[i];
+                if (grp.empty()) continue;
+                const auto off = grp.front().offset;
+                const auto va = file_offset_to_va(off);
+                wchar_t ib[24]{}, lb[64]{};
+                swprintf_s(ib, L"#%zu (%zuB)", i + 1, grp.size());
+                swprintf_s(lb, L"0x%llX  (off 0x%zX)", static_cast<unsigned long long>(va), off);
+                std::wstring oh, nh;
+                for (std::size_t k = 0; k < grp.size() && k < 16; ++k) {
+                    wchar_t b1[8]{}, b2[8]{};
+                    swprintf_s(b1, k ? L" %02X" : L"%02X", grp[k].old_value);
+                    swprintf_s(b2, k ? L" %02X" : L"%02X", grp[k].new_value);
+                    oh += b1; nh += b2;
+                }
+                if (grp.size() > 16) { oh += L"..."; nh += L"..."; }
+                s->rows.push_back({i, off, va, ib, lb, oh + L"  ->  " + nh});
+            }
+            ListView_SetItemCountEx(s->list, static_cast<int>(s->rows.size()), LVSICF_NOINVALIDATEALL);
+            InvalidateRect(s->list, nullptr, TRUE);
+        };
+        switch (msg) {
+        case WM_INITDIALOG: {
+            SetWindowLongPtrW(dlg, DWLP_USER, lp);
+            s = reinterpret_cast<State*>(lp);
+            dark_title_bar(dlg);
+            s->list = CreateWindowExW(0, WC_LISTVIEWW, L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | LVS_REPORT | LVS_OWNERDATA | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+                12, 12, 640, 260, dlg, reinterpret_cast<HMENU>(static_cast<INT_PTR>(105)), g_instance, nullptr);
+            ListView_SetExtendedListViewStyle(s->list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+            SendMessageW(s->list, WM_SETFONT, reinterpret_cast<WPARAM>(g_code_font), TRUE);
+            ListView_SetBkColor(s->list, THEMED_RGB(24, 27, 32)); ListView_SetTextBkColor(s->list, THEMED_RGB(24, 27, 32)); ListView_SetTextColor(s->list, THEMED_RGB(215, 228, 238));
+            if (const auto ux = GetModuleHandleW(L"uxtheme.dll")) {
+                using Fn = HRESULT(WINAPI*)(HWND, LPCWSTR, LPCWSTR);
+                if (const auto st_fn = reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(ux, "SetWindowTheme")))) if (!g_light_theme) st_fn(s->list, L"DarkMode_ItemsView", nullptr);
+            }
+            const wchar_t* cols[] = {L"Patch", L"VA (File Offset)", L"Old -> New"};
+            const int wids[] = {95, 220, 320};
+            for (int i = 0; i < 3; ++i) { LVCOLUMNW c{}; c.mask = LVCF_TEXT | LVCF_WIDTH; c.pszText = const_cast<wchar_t*>(cols[i]); c.cx = wids[i]; ListView_InsertColumn(s->list, i, &c); }
+            if (!g_light_theme) if (HWND hdr = ListView_GetHeader(s->list)) SetWindowSubclass(hdr, dark_list_header_subclass, 1, 0);
+            RECT rc{}; GetClientRect(dlg, &rc);
+            MoveWindow(s->list, 12, 10, rc.right - 24, rc.bottom - 52, TRUE);
+            MoveWindow(GetDlgItem(dlg, IDOK), 12, rc.bottom - 34, 72, 24, TRUE);
+            MoveWindow(GetDlgItem(dlg, 201), 90, rc.bottom - 34, 86, 24, TRUE);
+            MoveWindow(GetDlgItem(dlg, 202), 182, rc.bottom - 34, 96, 24, TRUE);
+            MoveWindow(GetDlgItem(dlg, 203), 284, rc.bottom - 34, 104, 24, TRUE);
+            MoveWindow(GetDlgItem(dlg, IDCANCEL), rc.right - 84, rc.bottom - 34, 72, 24, TRUE);
+            rebuild_list();
+            RECT own{}, box{}; GetWindowRect(s->owner, &own); GetWindowRect(dlg, &box);
+            SetWindowPos(dlg, nullptr, own.left + ((own.right - own.left) - (box.right - box.left)) / 2, own.top + ((own.bottom - own.top) - (box.bottom - box.top)) / 3, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+            SetFocus(s->list);
+            return FALSE;
+        }
+        case WM_CTLCOLORDLG: return g_light_theme ? static_cast<INT_PTR>(reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_BTNFACE))) : reinterpret_cast<INT_PTR>(g_background);
+        case WM_DRAWITEM: prompt_draw_button(*reinterpret_cast<DRAWITEMSTRUCT*>(lp)); return TRUE;
+        case WM_NOTIFY: {
+            auto* hdr = reinterpret_cast<LPNMHDR>(lp);
+            if (s && hdr->hwndFrom == s->list && hdr->code == LVN_GETDISPINFOW) {
+                auto* info = reinterpret_cast<NMLVDISPINFOW*>(lp);
+                if ((info->item.mask & LVIF_TEXT) && info->item.iItem >= 0 && info->item.iItem < static_cast<int>(s->rows.size())) {
+                    const auto& r = s->rows[static_cast<std::size_t>(info->item.iItem)];
+                    static thread_local std::wstring cell;
+                    cell = info->item.iSubItem == 0 ? r.idx_s : (info->item.iSubItem == 1 ? r.loc_s : r.bytes_s);
+                    info->item.pszText = cell.data();
+                }
+                return TRUE;
+            }
+            if (s && hdr->hwndFrom == s->list && hdr->code == NM_DBLCLK) {
+                const int item = reinterpret_cast<NMITEMACTIVATE*>(lp)->iItem;
+                if (item >= 0 && item < static_cast<int>(s->rows.size())) {
+                    navigate_to_address(s->owner, s->rows[static_cast<std::size_t>(item)].va, is_graph_view_active() ? 0 : 1);
+                    EndDialog(dlg, IDOK);
+                }
+                return TRUE;
+            }
+            break;
+        }
+        case WM_COMMAND:
+            if (!s) break;
+            if (LOWORD(wp) == IDOK) {
+                const int sel = ListView_GetNextItem(s->list, -1, LVNI_SELECTED);
+                if (sel >= 0 && sel < static_cast<int>(s->rows.size())) navigate_to_address(s->owner, s->rows[static_cast<std::size_t>(sel)].va, is_graph_view_active() ? 0 : 1);
+                EndDialog(dlg, IDOK);
+                return TRUE;
+            }
+            if (LOWORD(wp) == 201) { undo_patch(s->owner); rebuild_list(); return TRUE; }
+            if (LOWORD(wp) == 202) {
+                if (g_patch_undo.empty()) { MessageBoxW(dlg, L"Нет патчей для экспорта.", L"Export .1337", MB_ICONINFORMATION); return TRUE; }
+                wchar_t fn[MAX_PATH] = L"patches.1337";
+                OPENFILENAMEW d{sizeof(d)}; d.hwndOwner = dlg; d.lpstrFilter = L"x64dbg Patch (*.1337)\0*.1337\0All files (*.*)\0*.*\0"; d.lpstrFile = fn; d.nMaxFile = MAX_PATH; d.Flags = OFN_OVERWRITEPROMPT;
+                if (GetSaveFileNameW(&d)) {
+                    std::ofstream out(std::filesystem::path(fn), std::ios::binary);
+                    out << ">" << utf8_from_wide(g_database->image().path.filename().wstring()) << "\r\n";
+                    for (const auto& grp : g_patch_undo) for (const auto& c : grp) {
+                        char line[64]{}; snprintf(line, sizeof(line), "%08zX:%02X->%02X\r\n", c.offset, c.old_value, c.new_value); out << line;
+                    }
+                    SetWindowTextW(g_status, L"Exported patches to .1337.");
+                }
+                return TRUE;
+            }
+            if (LOWORD(wp) == 203) { apply_patches_to_file(s->owner); return TRUE; }
+            if (LOWORD(wp) == IDCANCEL) { EndDialog(dlg, IDCANCEL); return TRUE; }
+            break;
+        }
+        return FALSE;
+    };
+    std::vector<BYTE> data(sizeof(DLGTEMPLATE), 0);
+    { DLGTEMPLATE hdr{}; hdr.style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_SETFONT; hdr.cdit = 5; hdr.x = 10; hdr.y = 10; hdr.cx = 360; hdr.cy = 200; std::memcpy(data.data(), &hdr, sizeof(hdr)); }
+    prompt_word(data, 0); prompt_word(data, 0); prompt_string(data, L"Patch Manager"); prompt_word(data, 9); prompt_string(data, L"Segoe UI");
+    auto add_ctrl = [&](DWORD style, short x, short y, short cx, short cy, WORD id, const wchar_t* txt) {
+        while (data.size() & 3u) data.push_back(0);
+        DLGITEMTEMPLATE item{}; item.style = style; item.x = x; item.y = y; item.cx = cx; item.cy = cy; item.id = id;
+        const auto at = data.size(); data.resize(at + sizeof(item)); std::memcpy(data.data() + at, &item, sizeof(item));
+        prompt_word(data, 0xffff); prompt_word(data, 0x0080); prompt_string(data, txt); prompt_word(data, 0);
+    };
+    add_ctrl(WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0000000BL, 6, 180, 44, 14, IDOK, L"Jump");
+    add_ctrl(WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0000000BL, 54, 180, 52, 14, 201, L"Undo Last");
+    add_ctrl(WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0000000BL, 110, 180, 58, 14, 202, L"Export .1337");
+    add_ctrl(WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0000000BL, 172, 180, 62, 14, 203, L"Apply to File");
+    add_ctrl(WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0000000BL, 310, 180, 44, 14, IDCANCEL, L"Close");
+    DialogBoxIndirectParamW(g_instance, reinterpret_cast<DLGTEMPLATE*>(data.data()), window, proc, reinterpret_cast<LPARAM>(&st));
+}
+
+void hex_patch_at_cursor(HWND window) {
+    if (!g_database || !g_current_address) { MessageBoxW(window, L"Выбери адрес в Hex View.", L"Patch Bytes", MB_ICONINFORMATION); return; }
+    const auto input = prompt_text(window, L"Patch Bytes at Cursor", L"Hex bytes (e.g. 90 90 EB 05):", L"90");
+    if (!input || input->empty()) return;
+    std::vector<std::uint8_t> bytes;
+    if (!builtin_asm::raw_bytes(*input, bytes) || bytes.empty()) { MessageBoxW(window, L"Некорректные hex-байты.", L"Patch Bytes", MB_ICONWARNING); return; }
+    apply_semantic_patch(window, g_current_address, bytes, L"Patch Bytes", L"Hex bytes patched.");
+}
+
+void hex_copy_as(HWND window, int format) {
+    if (!g_database || !g_current_address) return;
+    const auto off = g_database->image().va_to_file_offset(g_current_address);
+    if (!off || *off >= g_database->image().bytes.size()) { MessageBoxW(window, L"Адрес не найден в файле.", L"Hex Copy", MB_ICONWARNING); return; }
+    const auto len_txt = prompt_text(window, L"Copy Hex Bytes", L"Length (bytes, 1..4096):", L"16");
+    if (!len_txt || len_txt->empty()) return;
+    std::size_t n = 16;
+    try { n = (std::clamp<std::size_t>)(std::stoull(*len_txt, nullptr, 0), 1, 4096); } catch (...) { n = 16; }
+    const auto& raw = g_database->image().bytes;
+    n = (std::min)(n, raw.size() - *off);
+    std::wostringstream o;
+    if (format == 0) {
+        o << L"unsigned char data[" << n << L"] = { ";
+        for (std::size_t i = 0; i < n; ++i) {
+            wchar_t b[12]{}; swprintf_s(b, i ? L", 0x%02X" : L"0x%02X", raw[*off + i]); o << b;
+        }
+        o << L" };";
+    } else if (format == 1) {
+        o << L"data = b\"";
+        for (std::size_t i = 0; i < n; ++i) { wchar_t b[8]{}; swprintf_s(b, L"\\x%02x", raw[*off + i]); o << b; }
+        o << L"\"";
+    } else {
+        for (std::size_t i = 0; i < n; ++i) { wchar_t b[8]{}; swprintf_s(b, i ? L" %02X" : L"%02X", raw[*off + i]); o << b; }
+    }
+    copy_text_to_clipboard(window, o.str());
+    SetWindowTextW(g_status, (L"Copied " + std::to_wstring(n) + L" bytes to clipboard.").c_str());
 }
 
 // A conditional Jcc is either a 2-byte short form (0x70..0x7F) or a 6-byte near
@@ -7798,6 +8395,10 @@ void init(HWND main) {
     add(L"python", L"Python", kBottom, false, [](HWND parent) { return pyconsole_create(parent); });
     add(L"types", L"Local Types Editor", kFloat, false, [](HWND parent) { return typewin_create(parent); });
     add(L"diff", L"Diff", kBottom, false, [](HWND parent) { return diffwin_create(parent); }, true);
+    add(L"dbg_regs", L"Registers", kRight, false, [](HWND parent) { return dbg_regs_create(parent); });
+    add(L"dbg_stack", L"Stack", kBottom, false, [](HWND parent) { return dbg_stack_create(parent); });
+    add(L"dbg_modules", L"Modules", kBottom, false, [](HWND parent) { return dbg_modules_create(parent); });
+    add(L"dbg_threads", L"Threads", kBottom, false, [](HWND parent) { return dbg_threads_create(parent); });
     active_id[kLeft] = L"functions";
     active_id[kRight] = L"overview";
 }
@@ -7805,7 +8406,7 @@ void init(HWND main) {
 void reset_defaults() {
     sizes[kLeft] = 290; sizes[kRight] = 240; sizes[kBottom] = 150;
     struct Default { const wchar_t* id; Area area; bool visible; };
-    const Default defaults[] = {{L"navigator", kLeft, true}, {L"functions", kLeft, true}, {L"overview", kRight, true}, {L"output", kBottom, true}, {L"python", kBottom, false}, {L"types", kFloat, false}, {L"diff", kBottom, false}};
+    const Default defaults[] = {{L"navigator", kLeft, true}, {L"functions", kLeft, true}, {L"overview", kRight, true}, {L"output", kBottom, true}, {L"python", kBottom, false}, {L"types", kFloat, false}, {L"diff", kBottom, false}, {L"dbg_regs", kRight, false}, {L"dbg_stack", kBottom, false}, {L"dbg_modules", kBottom, false}, {L"dbg_threads", kBottom, false}};
     for (const auto& d : defaults) {
         Panel* p = find(d.id);
         if (!p) continue;
@@ -8728,6 +9329,7 @@ bool breakpoint_condition_matches(HANDLE process, DWORD thread_id, std::uint64_t
 }
 
 void install_requested_breakpoints(HANDLE process, std::uint64_t base) {
+    if (!g_database) return;
     std::lock_guard lock(g_breakpoint_mutex);
     for (const auto static_address : g_requested_breakpoints) {
         const auto runtime = base + (static_address - g_database->image().image_base);
@@ -8805,11 +9407,38 @@ void configure_debug_resume(HANDLE process, DWORD thread_id, std::uint64_t runti
         || (mode == DebugResumeMode::StepOver && !step_over_armed));
 }
 
-void debug_loop(HWND window, HANDLE process, DWORD pid) {
+void debug_loop(HWND window, HANDLE process, DWORD pid, bool pause_on_initial_break = false) {
     DEBUG_EVENT event{};
     std::uint64_t rearm_runtime = 0; DWORD rearm_thread = 0;
     bool initial_breakpoint_seen = false;
-    while (WaitForDebugEvent(&event, INFINITE)) {
+    while (true) {
+        if (!WaitForDebugEvent(&event, 100)) {
+            if (GetLastError() == ERROR_SEM_TIMEOUT) {
+                if (g_debug_detach_requested.exchange(false)) {
+                    restore_import_disables(process);
+                    {
+                        std::lock_guard lock(g_breakpoint_mutex);
+                        for (const auto& [rt, bp] : g_runtime_breakpoints) write_runtime_byte(process, rt, bp.original);
+                        g_runtime_breakpoints.clear();
+                    }
+                    DebugActiveProcessStop(pid);
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
+        if (g_debug_detach_requested.exchange(false)) {
+            restore_import_disables(process);
+            {
+                std::lock_guard lock(g_breakpoint_mutex);
+                for (const auto& [rt, bp] : g_runtime_breakpoints) write_runtime_byte(process, rt, bp.original);
+                g_runtime_breakpoints.clear();
+            }
+            ContinueDebugEvent(event.dwProcessId, event.dwThreadId, DBG_CONTINUE);
+            DebugActiveProcessStop(pid);
+            break;
+        }
         DWORD continue_status = DBG_CONTINUE;
         const auto trace_address = event.dwDebugEventCode == EXCEPTION_DEBUG_EVENT
             ? reinterpret_cast<std::uint64_t>(event.u.Exception.ExceptionRecord.ExceptionAddress) : 0;
@@ -8908,6 +9537,10 @@ void debug_loop(HWND window, HANDLE process, DWORD pid) {
                 } else if (!initial_breakpoint_seen) {
                     initial_breakpoint_seen = true;
                     log_debug_event(L"INITIAL_BREAKPOINT");
+                    if (pause_on_initial_break) {
+                        const auto mode = wait_for_debug_resume(window, exception_address, 1);
+                        configure_debug_resume(process, event.dwThreadId, exception_address, mode, false);
+                    }
                 } else {
                     log_debug_event(L"BREAK requested by debugger");
                     const auto mode = wait_for_debug_resume(window, exception_address, 1);
@@ -9048,6 +9681,276 @@ bool read_debug_context(CONTEXT& context, HANDLE& thread) {
 
 void finish_debug_context(HANDLE thread) {
     if (thread) { ResumeThread(thread); CloseHandle(thread); }
+}
+
+void attach_debugger(HWND window) {
+    if (g_debug_process.load() || g_debug_starting.load()) {
+        MessageBoxW(window, L"Отладчик уже запущен. Сначала сделай Detach или Stop.", L"Attach to Process", MB_ICONINFORMATION);
+        return;
+    }
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) {
+        MessageBoxW(window, L"Не удалось перечислить процессы.", L"Attach to Process", MB_ICONERROR);
+        return;
+    }
+    std::vector<PickerRow> rows;
+    PROCESSENTRY32W pe{sizeof(pe)};
+    const DWORD self_pid = GetCurrentProcessId();
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (pe.th32ProcessID == 0 || pe.th32ProcessID == self_pid) continue;
+            wchar_t pid_buf[24]{}, th_buf[24]{};
+            swprintf_s(pid_buf, L"%lu (0x%lX)", pe.th32ProcessID, pe.th32ProcessID);
+            swprintf_s(th_buf, L"%lu threads", pe.cntThreads);
+            rows.push_back({pe.th32ProcessID, pid_buf, pe.szExeFile, th_buf});
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    std::sort(rows.begin(), rows.end(), [](const PickerRow& a, const PickerRow& b) { return _wcsicmp(a.col2.c_str(), b.col2.c_str()) < 0; });
+    const auto chosen = show_picker_popup(window, L"Attach to Process...", L"PID", L"Process", L"Threads", std::move(rows));
+    if (!chosen || *chosen == 0) return;
+    if (g_debug_starting.exchange(true)) return;
+    const DWORD pid = static_cast<DWORD>(*chosen);
+    { std::lock_guard lock(g_breakpoint_mutex); g_breakpoint_hit_counts.clear(); }
+    g_debug_detach_requested.store(false);
+    std::thread([window, pid] {
+        HANDLE proc = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+        if (!proc) proc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
+        if (!proc || !DebugActiveProcess(pid)) {
+            const DWORD err = GetLastError();
+            if (proc) CloseHandle(proc);
+            g_debug_starting.store(false);
+            PostMessageW(window, WM_DEBUG_STATUS, 7, static_cast<LPARAM>(err));
+            return;
+        }
+        DebugSetProcessKillOnExit(FALSE);
+        g_debug_process.store(proc);
+        g_debug_pid.store(pid);
+        write_debug_pid_file(pid);
+        g_stealth_applied.store(false);
+        g_debug_paused.store(false);
+        g_debug_pause_address.store(0);
+        g_pause_on_next_single_step.store(false);
+        g_debug_starting.store(false);
+        { std::wostringstream text; text << L"ATTACH_DEBUGGER pid=" << pid; log_debug_event(text.str()); }
+        PostMessageW(window, WM_DEBUG_STATUS, 8, static_cast<LPARAM>(pid));
+        debug_loop(window, proc, pid, true);
+    }).detach();
+    SetWindowTextW(g_status, (L"Attaching to PID " + std::to_wstring(pid) + L"...").c_str());
+}
+
+void detach_debugger(HWND window) {
+    if (!g_debug_process.load()) { SetWindowTextW(g_status, L"No active debug process."); return; }
+    g_debug_detach_requested.store(true);
+    request_debug_resume(DebugResumeMode::Continue);
+    SetWindowTextW(g_status, L"Detaching from process...");
+    (void)window;
+}
+
+namespace dbgdock {
+enum Kind { kRegs = 1, kStack = 2, kModules = 3, kThreads = 4 };
+HWND panes[5]{}, lists[5]{};
+std::unordered_map<std::wstring, std::uint64_t> prev_regs, shown_regs;
+std::vector<std::wstring> reg_names;
+std::vector<bool> reg_changed;
+std::uint64_t last_rip = 0;
+std::vector<std::uint64_t> stack_targets, mod_bases;
+std::vector<DWORD> thread_ids;
+
+std::wstring hex_u64(std::uint64_t v) { wchar_t b[24]{}; swprintf_s(b, L"0x%016llX", static_cast<unsigned long long>(v)); return b; }
+
+void add_row(HWND lv, int row, std::initializer_list<std::wstring> cols) {
+    int col = 0;
+    for (const auto& text : cols) {
+        LVITEMW it{}; it.mask = LVIF_TEXT; it.iItem = row; it.iSubItem = col;
+        std::wstring copy = text; it.pszText = copy.data();
+        if (col == 0) ListView_InsertItem(lv, &it); else ListView_SetItem(lv, &it);
+        ++col;
+    }
+}
+
+void edit_reg_dialog(HWND owner, const std::wstring& name) {
+    const auto cur = shown_regs.contains(name) ? hex_u64(shown_regs[name]) : L"0x0";
+    const auto val_txt = prompt_text(owner, L"Edit Register", (L"New hex value for " + name + L":").c_str(), cur);
+    if (!val_txt || val_txt->empty()) return;
+    std::uint64_t val = 0;
+    try { val = std::stoull(*val_txt, nullptr, 16); } catch (...) { return; }
+    const DWORD tid = g_debug_thread.load();
+    HANDLE th = tid ? OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, tid) : nullptr;
+    if (!th) return;
+    SuspendThread(th);
+    CONTEXT ctx{}; ctx.ContextFlags = CONTEXT_FULL;
+    if (GetThreadContext(th, &ctx)) {
+#if defined(_M_AMD64)
+        if (name == L"RIP") ctx.Rip = val; else if (name == L"RAX") ctx.Rax = val; else if (name == L"RBX") ctx.Rbx = val;
+        else if (name == L"RCX") ctx.Rcx = val; else if (name == L"RDX") ctx.Rdx = val; else if (name == L"RSI") ctx.Rsi = val;
+        else if (name == L"RDI") ctx.Rdi = val; else if (name == L"RBP") ctx.Rbp = val; else if (name == L"RSP") ctx.Rsp = val;
+        else if (name == L"R8") ctx.R8 = val; else if (name == L"R9") ctx.R9 = val; else if (name == L"R10") ctx.R10 = val;
+        else if (name == L"R11") ctx.R11 = val; else if (name == L"R12") ctx.R12 = val; else if (name == L"R13") ctx.R13 = val;
+        else if (name == L"R14") ctx.R14 = val; else if (name == L"R15") ctx.R15 = val; else if (name == L"EFLAGS") ctx.EFlags = static_cast<DWORD>(val);
+#endif
+        SetThreadContext(th, &ctx);
+    }
+    ResumeThread(th); CloseHandle(th);
+    dbg_panels_refresh();
+}
+
+LRESULT CALLBACK panel_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    const int kind = static_cast<int>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (msg) {
+    case WM_SIZE:
+        if (kind >= 1 && kind <= 4 && lists[kind]) MoveWindow(lists[kind], 0, 0, LOWORD(lparam), HIWORD(lparam), TRUE);
+        return 0;
+    case WM_SETFOCUS:
+        if (kind >= 1 && kind <= 4 && lists[kind]) SetFocus(lists[kind]);
+        return 0;
+    case WM_NOTIFY: {
+        auto* hdr = reinterpret_cast<LPNMHDR>(lparam);
+        if (kind == kRegs && hdr->hwndFrom == lists[kRegs] && hdr->code == NM_CUSTOMDRAW) {
+            auto* cd = reinterpret_cast<NMLVCUSTOMDRAW*>(lparam);
+            if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
+            if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+                const auto idx = static_cast<std::size_t>(cd->nmcd.dwItemSpec);
+                const bool diff = idx < reg_changed.size() && reg_changed[idx];
+                cd->clrText = diff ? RGB(255, 110, 110) : THEMED_RGB(215, 228, 238);
+                cd->clrTextBk = THEMED_RGB(24, 27, 32);
+                return CDRF_NEWFONT;
+            }
+        }
+        if (hdr->code == NM_DBLCLK) {
+            const int row = reinterpret_cast<NMITEMACTIVATE*>(lparam)->iItem;
+            if (row < 0) return 0;
+            const auto idx = static_cast<std::size_t>(row);
+            if (kind == kRegs && idx < reg_names.size()) edit_reg_dialog(g_main_window ? g_main_window : hwnd, reg_names[idx]);
+            else if (kind == kStack && idx < stack_targets.size() && stack_targets[idx]) navigate_to_address(g_main_window, stack_targets[idx], is_graph_view_active() ? 0 : 1);
+            else if (kind == kModules && idx < mod_bases.size() && mod_bases[idx]) navigate_to_address(g_main_window, mod_bases[idx], is_graph_view_active() ? 0 : 1);
+            else if (kind == kThreads && idx < thread_ids.size() && thread_ids[idx]) {
+                g_debug_thread.store(thread_ids[idx]);
+                SetWindowTextW(g_status, (L"Switched active thread to TID " + std::to_wstring(thread_ids[idx])).c_str());
+                dbg_panels_refresh();
+            }
+            return 0;
+        }
+        break;
+    }
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+HWND create_panel(HWND parent, Kind kind, const wchar_t* title, const std::vector<std::pair<const wchar_t*, int>>& cols) {
+    static bool reg_cls = false;
+    if (!reg_cls) {
+        WNDCLASSW wc{}; wc.hInstance = g_instance; wc.lpfnWndProc = panel_proc; wc.lpszClassName = L"GandonDbgPanel";
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW); wc.hbrBackground = g_panel; RegisterClassW(&wc); reg_cls = true;
+    }
+    HWND host_wnd = CreateWindowExW(0, L"GandonDbgPanel", title, WS_CHILD | WS_CLIPCHILDREN, 0, 0, 300, 180, parent, nullptr, g_instance, nullptr);
+    if (!host_wnd) return nullptr;
+    SetWindowLongPtrW(host_wnd, GWLP_USERDATA, static_cast<LONG_PTR>(kind));
+    HWND lv = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+                              0, 0, 300, 180, host_wnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(1)), g_instance, nullptr);
+    ListView_SetExtendedListViewStyle(lv, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+    SendMessageW(lv, WM_SETFONT, reinterpret_cast<WPARAM>(g_code_font), TRUE);
+    ListView_SetBkColor(lv, THEMED_RGB(24, 27, 32)); ListView_SetTextBkColor(lv, THEMED_RGB(24, 27, 32)); ListView_SetTextColor(lv, THEMED_RGB(215, 228, 238));
+    if (!g_light_theme) {
+        if (const auto ux = GetModuleHandleW(L"uxtheme.dll")) {
+            using Fn = HRESULT(WINAPI*)(HWND, LPCWSTR, LPCWSTR);
+            if (const auto st = reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(ux, "SetWindowTheme")))) st(lv, L"DarkMode_ItemsView", nullptr);
+        }
+        if (HWND h = ListView_GetHeader(lv)) SetWindowSubclass(h, dark_list_header_subclass, 1, 0);
+    }
+    for (int i = 0; i < static_cast<int>(cols.size()); ++i) {
+        LVCOLUMNW c{}; c.mask = LVCF_TEXT | LVCF_WIDTH; c.pszText = const_cast<wchar_t*>(cols[i].first); c.cx = cols[i].second;
+        ListView_InsertColumn(lv, i, &c);
+    }
+    panes[kind] = host_wnd; lists[kind] = lv;
+    dbg_panels_refresh();
+    return host_wnd;
+}
+} // namespace dbgdock
+
+HWND dbg_regs_create(HWND parent) { return dbgdock::create_panel(parent, dbgdock::kRegs, L"Registers", {{L"Reg", 80}, {L"Value", 160}}); }
+HWND dbg_stack_create(HWND parent) { return dbgdock::create_panel(parent, dbgdock::kStack, L"Stack", {{L"RSP+Off", 150}, {L"Value", 150}, {L"Symbol", 220}}); }
+HWND dbg_modules_create(HWND parent) { return dbgdock::create_panel(parent, dbgdock::kModules, L"Modules", {{L"Module", 130}, {L"Base", 140}, {L"Size", 90}, {L"Path", 300}}); }
+HWND dbg_threads_create(HWND parent) { return dbgdock::create_panel(parent, dbgdock::kThreads, L"Threads", {{L"TID", 90}, {L"Status", 100}, {L"Owner PID", 90}}); }
+
+void dbg_panels_refresh() {
+    using namespace dbgdock;
+    const HANDLE proc = g_debug_process.load();
+    const DWORD pid = g_debug_pid.load();
+    const DWORD active_tid = g_debug_thread.load();
+    CONTEXT ctx{}; HANDLE th{};
+    const bool have_ctx = proc && read_debug_context(ctx, th);
+    if (th) finish_debug_context(th);
+    if (lists[kRegs]) {
+        ListView_DeleteAllItems(lists[kRegs]); reg_names.clear(); reg_changed.clear();
+        if (have_ctx) {
+#if defined(_M_AMD64)
+            if (ctx.Rip != last_rip) { if (!shown_regs.empty()) prev_regs = shown_regs; last_rip = ctx.Rip; }
+            const std::pair<const wchar_t*, std::uint64_t> entries[] = {
+                {L"RIP", ctx.Rip}, {L"RAX", ctx.Rax}, {L"RBX", ctx.Rbx}, {L"RCX", ctx.Rcx}, {L"RDX", ctx.Rdx},
+                {L"RSI", ctx.Rsi}, {L"RDI", ctx.Rdi}, {L"RBP", ctx.Rbp}, {L"RSP", ctx.Rsp}, {L"R8", ctx.R8},
+                {L"R9", ctx.R9}, {L"R10", ctx.R10}, {L"R11", ctx.R11}, {L"R12", ctx.R12}, {L"R13", ctx.R13},
+                {L"R14", ctx.R14}, {L"R15", ctx.R15}, {L"EFLAGS", ctx.EFlags}
+            };
+            int row = 0;
+            for (const auto& [nm, val] : entries) {
+                const bool ch = prev_regs.contains(nm) && prev_regs[nm] != val;
+                shown_regs[nm] = val; reg_names.push_back(nm); reg_changed.push_back(ch);
+                add_row(lists[kRegs], row++, {nm, hex_u64(val)});
+            }
+#endif
+        } else { prev_regs.clear(); shown_regs.clear(); last_rip = 0; }
+    }
+    if (lists[kStack]) {
+        ListView_DeleteAllItems(lists[kStack]); stack_targets.clear();
+        if (have_ctx) {
+#if defined(_M_AMD64)
+            std::uint64_t slots[32]{}; SIZE_T got = 0;
+            if (ReadProcessMemory(proc, reinterpret_cast<LPCVOID>(ctx.Rsp), slots, sizeof(slots), &got)) {
+                const int n = static_cast<int>(got / 8);
+                for (int i = 0; i < n; ++i) {
+                    const std::uint64_t val = slots[i]; stack_targets.push_back(val);
+                    std::wstring sym;
+                    if (g_custom_labels.contains(val)) sym = g_custom_labels[val];
+                    else if (g_database) if (const auto fn = g_database->function_at(val)) sym = wide(fn->get().name);
+                    add_row(lists[kStack], i, {hex_u64(ctx.Rsp + static_cast<std::uint64_t>(i) * 8), hex_u64(val), sym});
+                }
+            }
+#endif
+        }
+    }
+    if (lists[kModules]) {
+        ListView_DeleteAllItems(lists[kModules]); mod_bases.clear();
+        if (proc && pid) {
+            HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+            if (snap != INVALID_HANDLE_VALUE) {
+                MODULEENTRY32W me{sizeof(me)}; int row = 0;
+                if (Module32FirstW(snap, &me)) do {
+                    const auto b = reinterpret_cast<std::uint64_t>(me.modBaseAddr);
+                    mod_bases.push_back(b);
+                    wchar_t sb[24]{}; swprintf_s(sb, L"0x%lX", me.modBaseSize);
+                    add_row(lists[kModules], row++, {me.szModule, hex_u64(b), sb, me.szExePath});
+                } while (Module32NextW(snap, &me));
+                CloseHandle(snap);
+            }
+        }
+    }
+    if (lists[kThreads]) {
+        ListView_DeleteAllItems(lists[kThreads]); thread_ids.clear();
+        if (proc && pid) {
+            HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if (snap != INVALID_HANDLE_VALUE) {
+                THREADENTRY32 te{sizeof(te)}; int row = 0;
+                if (Thread32First(snap, &te)) do {
+                    if (te.th32OwnerProcessID != pid) continue;
+                    thread_ids.push_back(te.th32ThreadID);
+                    wchar_t tb[24]{}; swprintf_s(tb, L"%lu (0x%lX)", te.th32ThreadID, te.th32ThreadID);
+                    add_row(lists[kThreads], row++, {tb, te.th32ThreadID == active_tid ? L"* Active" : L"Suspended", std::to_wstring(pid)});
+                } while (Thread32Next(snap, &te));
+                CloseHandle(snap);
+            }
+        }
+    }
 }
 
 bool evaluate_watch_expression(HANDLE process, const CONTEXT& context, std::wstring expression,
@@ -10202,6 +11105,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         AppendMenuW(file, MF_STRING, ID_OPEN, L"Open Binary (PE/ELF/SO)...\tCtrl+O");
         AppendMenuW(file, MF_STRING, ID_SAVE_DB, L"Save Database (.gnd)...\tCtrl+S");
         AppendMenuW(file, MF_STRING, ID_LOAD_DB, L"Load Database (.gnd)...\tCtrl+L");
+        AppendMenuW(file, MF_STRING, ID_LOAD_PDB, L"Load PDB Symbols...");
         AppendMenuW(file, MF_STRING, ID_APPLY_PATCHES, L"Apply Patches to File...\tCtrl+Alt+P");
         AppendMenuW(file, MF_STRING, ID_EXPORT_GRAPH, L"Export Graph to PNG...");
         AppendMenuW(file, MF_STRING, ID_EXPORT_JSON, L"Export Analysis JSON...");
@@ -10214,6 +11118,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         AppendMenuW(edit, MF_STRING, ID_NOP_BLOCK, L"NOP Current Block\tCtrl+F2"); AppendMenuW(edit, MF_STRING, ID_EDIT_INSTRUCTION, L"Edit Instruction\tCtrl+E");
         AppendMenuW(edit, MF_POPUP, reinterpret_cast<UINT_PTR>(build_patch_submenu()), L"Patch Branch / Stub");
         AppendMenuW(edit, MF_STRING, ID_UNDO_PATCH, L"Undo Patch\tCtrl+Z"); AppendMenuW(edit, MF_STRING, ID_REDO_PATCH, L"Redo Patch\tCtrl+Y");
+        AppendMenuW(edit, MF_STRING, ID_PATCH_MANAGER, L"Patch Manager...");
         HMENU jump = CreatePopupMenu();
         AppendMenuW(jump, MF_STRING, ID_JUMP_ADDR, L"Jump to Address / Label...\tG");
         AppendMenuW(jump, MF_STRING, ID_FIND_FUNCTION, L"Jump to Function...\tCtrl+P");
@@ -10311,7 +11216,10 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         AppendMenuW(tools, MF_STRING, ID_RESTORE_HIDDEN, L"Restore All Hidden Symbols");
 
         HMENU debugger = CreatePopupMenu();
-        AppendMenuW(debugger, MF_STRING, ID_RUN, L"Start / Continue Process\tF9"); AppendMenuW(debugger, MF_STRING, ID_PAUSE, L"Pause Process\tF6"); AppendMenuW(debugger, MF_STRING, ID_STEP_INTO, L"Step Into\tF7"); AppendMenuW(debugger, MF_STRING, ID_STEP_OVER, L"Step Over\tF8");
+        AppendMenuW(debugger, MF_STRING, ID_RUN, L"Start / Continue Process\tF9");
+        AppendMenuW(debugger, MF_STRING, ID_DBG_ATTACH, L"Attach to Process...");
+        AppendMenuW(debugger, MF_STRING, ID_DBG_DETACH, L"Detach from Process");
+        AppendMenuW(debugger, MF_STRING, ID_PAUSE, L"Pause Process\tF6"); AppendMenuW(debugger, MF_STRING, ID_STEP_INTO, L"Step Into\tF7"); AppendMenuW(debugger, MF_STRING, ID_STEP_OVER, L"Step Over\tF8");
         AppendMenuW(debugger, MF_STRING, ID_ANTI_DEBUG, L"Anti-anti-debug: PEB flags (reversible)");
         AppendMenuW(debugger, MF_STRING, ID_ANTIDEBUG_STATUS, L"Anti-anti-debug Status");
         AppendMenuW(debugger, MF_STRING, ID_TOGGLE_BP, L"Toggle Breakpoint\tF2"); AppendMenuW(debugger, MF_STRING, ID_COND_BP, L"Set Conditional Breakpoint..."); AppendMenuW(debugger, MF_STRING, ID_CONFIG_BP, L"Configure Breakpoint..."); AppendMenuW(debugger, MF_STRING, ID_BP_MANAGER, L"Breakpoint Manager...");
@@ -10732,6 +11640,14 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         if (id == ID_MCP_COPY_URL) { mcp_copy_url(window); return 0; }
         if (id == ID_MCP_COPY_CONFIG) { mcp_copy_client_config(window); return 0; }
         if (id == ID_MCP_STATUS) { mcp_show_status(window); return 0; }
+        if (id == ID_LOAD_PDB) { load_pdb_symbols_ui(window); return 0; }
+        if (id == ID_PATCH_MANAGER) { show_patch_manager(window); return 0; }
+        if (id == ID_DBG_ATTACH) { attach_debugger(window); return 0; }
+        if (id == ID_DBG_DETACH) { detach_debugger(window); return 0; }
+        if (id == ID_HEX_PATCH) { hex_patch_at_cursor(window); return 0; }
+        if (id == ID_HEX_COPY_C) { hex_copy_as(window, 0); return 0; }
+        if (id == ID_HEX_COPY_PY) { hex_copy_as(window, 1); return 0; }
+        if (id == ID_HEX_COPY_AOB) { hex_copy_as(window, 2); return 0; }
         return 0;
     }
     case WM_CONTEXTMENU: {
@@ -10789,6 +11705,13 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
             AppendMenuW(colors, MF_STRING, ID_COLOR_BLUE, L"Info (Blue)");
             AppendMenuW(context, MF_POPUP, reinterpret_cast<UINT_PTR>(colors), L"Set Color Tag");
         }
+        if (active_view_kind() == ViewKind::Hex && (address || g_current_address)) {
+            AppendMenuW(context, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(context, MF_STRING, ID_HEX_PATCH, L"Patch Bytes at Cursor...");
+            AppendMenuW(context, MF_STRING, ID_HEX_COPY_C, L"Copy as C Array");
+            AppendMenuW(context, MF_STRING, ID_HEX_COPY_PY, L"Copy as Python Bytes");
+            AppendMenuW(context, MF_STRING, ID_HEX_COPY_AOB, L"Copy as AOB Signature");
+        }
         POINT point{static_cast<int>(static_cast<short>(LOWORD(lparam))), static_cast<int>(static_cast<short>(HIWORD(lparam)))}; if (point.x == -1 && point.y == -1) GetCursorPos(&point);
         TrackPopupMenu(context, TPM_RIGHTBUTTON, point.x, point.y, 0, window, nullptr); DestroyMenu(context); return 0;
     }
@@ -10817,6 +11740,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
             SetWindowTextW(g_status, text);
         }
         if (active_legacy_tab() == 4) set_editor_text();
+        dbg_panels_refresh();
         update_status_bar_panes();
         return 0;
     case WM_APPCOMMAND: {

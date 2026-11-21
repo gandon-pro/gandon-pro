@@ -84,6 +84,7 @@ add_library(gandon_core STATIC
     src/il_emulator.cpp
     src/il_lifter.cpp
     src/plugin_host.cpp
+    src/pdb_loader.cpp
 )
 target_include_directories(gandon_core PUBLIC include)
 target_compile_definitions(gandon_core PRIVATE GANDON_CORE_BUILD)

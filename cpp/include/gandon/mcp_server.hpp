@@ -66,6 +66,27 @@ struct McpHostCallbacks {
 
     std::function<bool(const std::string& path, std::string& error)> save_database;
     std::function<bool(const std::string& path, std::string& error)> load_database;
+
+    // Types & prototypes
+    std::function<std::optional<std::string>()> list_types;
+    std::function<bool(const std::string& c_source, std::string& error)> define_type;
+    std::function<bool(std::uint64_t address, const std::string& prototype, std::string& error)> set_prototype;
+
+    // Live Win32 debugger
+    std::function<std::string()> dbg_status_json;
+    std::function<std::optional<std::string>()> dbg_regs_json;
+    std::function<bool(std::uint64_t address, bool enable, std::string& error)> dbg_toggle_bp;
+    std::function<bool(bool step_over, std::string& error)> dbg_step;
+    std::function<std::optional<std::string>(std::uint64_t address, std::size_t size)> dbg_read_mem;
+
+    // Unicorn CPU emulator
+    std::function<std::optional<std::string>(std::uint64_t address, std::size_t max_instructions)> emu_run_json;
+    std::function<std::optional<std::string>()> emu_regs_json;
+
+    // PDB & Patching
+    std::function<bool(const std::string& pdb_path, std::size_t& loaded_count, std::string& error)> load_pdb;
+    std::function<std::string()> list_patches_json;
+    std::function<bool(std::uint64_t address, const std::string& asm_text, std::size_t& bytes_written, std::string& error)> assemble_patch;
 };
 
 struct McpServerConfig {
