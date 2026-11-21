@@ -170,7 +170,7 @@ cpp/
 
 Gandon-PRO is under active development. Instruction coverage and analysis results depend on the input architecture and binary. Decompiled output is an analysis aid and should be checked against the disassembly.
 
-For release 3.2, the x64 GUI and CLI compiled successfully; all four CTest cases and the separate type tests passed. CLI/text-view smoke checks and the embedded administrator manifest were also verified. Interactive GUI operation, ScyllaHide injection, and live kernel-driver loading were not runtime-tested during release preparation.
+For release 3.4, the x64 GUI and CLI compiled successfully; all four CTest cases and the separate type tests passed. CLI/text-view smoke checks and the embedded administrator manifest were also verified. Interactive GUI operation, ScyllaHide injection, and live kernel-driver loading were not runtime-tested during release preparation.
 
 ## Contribute
 
