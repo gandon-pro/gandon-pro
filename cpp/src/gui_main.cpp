@@ -1693,37 +1693,96 @@ MinimapTransform minimap_transform(const RECT& client) {
     return t;
 }
 
-void minimap_scroll_to(HWND window, int mouse_x, int mouse_y) {
+void minimap_scroll_to(HWND window, int mouse_x, int mouse_y, double grab_world_x, double grab_world_y) {
     RECT client{}; GetClientRect(window, &client);
     const auto t = minimap_transform(client);
-    const double world_x = (std::max)(0.0, (std::min)(static_cast<double>(t.world_width), (mouse_x - t.origin_x) / t.scale));
-    const double world_y = (std::max)(0.0, (std::min)(static_cast<double>(t.world_height), (mouse_y - t.origin_y) / t.scale));
-    RECT view{}; GetClientRect(g_view, &view);
+    const double scale = (t.scale > 1e-6) ? t.scale : 1e-6;
+    const double world_x = (mouse_x - t.origin_x) / scale;
+    const double world_y = (mouse_y - t.origin_y) / scale;
     const double zoom = (std::max)(0.1, static_cast<double>(g_graph_zoom) / 100.0);
-    g_graph_scroll_x = static_cast<int>(world_x * zoom - view.right / 2.0);
-    g_graph_scroll_y = static_cast<int>(world_y * zoom - view.bottom / 2.0);
+    g_graph_scroll_x = static_cast<int>(std::lround((world_x - grab_world_x) * zoom));
+    g_graph_scroll_y = static_cast<int>(std::lround((world_y - grab_world_y) * zoom));
     clamp_graph_scroll(g_view);
-    InvalidateRect(g_view, nullptr, FALSE);
-    InvalidateRect(window, nullptr, FALSE);
 }
 
 LRESULT CALLBACK minimap_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    static double grab_wx = 0.0, grab_wy = 0.0;
+    static LARGE_INTEGER qpc_freq{};
+    static LARGE_INTEGER last_view_paint{};
     if (message == WM_ERASEBKGND) return 1;
     if (message == WM_MOUSEWHEEL && g_view) {
         SendMessageW(g_view, WM_MOUSEWHEEL, wparam, lparam);
         invalidate_minimap();
         return 0;
     }
-    if ((message == WM_LBUTTONDOWN || (message == WM_MOUSEMOVE && g_minimap_dragging)) && g_view && !g_graph_blocks.empty()) {
-        minimap_scroll_to(window, static_cast<int>(static_cast<short>(LOWORD(lparam))), static_cast<int>(static_cast<short>(HIWORD(lparam))));
-        if (message == WM_LBUTTONDOWN) { g_minimap_dragging = true; SetCapture(window); invalidate_minimap(); }
+    if (message == WM_LBUTTONDOWN && g_view && !g_graph_blocks.empty()) {
+        const int mx = GET_X_LPARAM(lparam);
+        const int my = GET_Y_LPARAM(lparam);
+        RECT client{}; GetClientRect(window, &client);
+        RECT view{}; GetClientRect(g_view, &view);
+        const auto t = minimap_transform(client);
+        const double scale = (t.scale > 1e-6) ? t.scale : 1e-6;
+        const double zoom = (std::max)(0.1, static_cast<double>(g_graph_zoom) / 100.0);
+        const double vp_wx = g_graph_scroll_x / zoom;
+        const double vp_wy = g_graph_scroll_y / zoom;
+        const double vp_ww = view.right / zoom;
+        const double vp_wh = view.bottom / zoom;
+        const RECT vp_px{
+            static_cast<LONG>(std::lround(t.origin_x + vp_wx * scale)),
+            static_cast<LONG>(std::lround(t.origin_y + vp_wy * scale)),
+            static_cast<LONG>(std::lround(t.origin_x + (vp_wx + vp_ww) * scale)),
+            static_cast<LONG>(std::lround(t.origin_y + (vp_wy + vp_wh) * scale))
+        };
+        const POINT pt{mx, my};
+        if (PtInRect(&vp_px, pt)) {
+            grab_wx = ((mx - t.origin_x) / scale) - vp_wx;
+            grab_wy = ((my - t.origin_y) / scale) - vp_wy;
+        } else {
+            grab_wx = vp_ww * 0.5;
+            grab_wy = vp_wh * 0.5;
+        }
+        g_minimap_dragging = true;
+        SetCapture(window);
+        minimap_scroll_to(window, mx, my, grab_wx, grab_wy);
+        InvalidateRect(window, nullptr, FALSE);
+        InvalidateRect(g_view, nullptr, FALSE);
+        UpdateWindow(window);
+        UpdateWindow(g_view);
+        if (!qpc_freq.QuadPart) QueryPerformanceFrequency(&qpc_freq);
+        QueryPerformanceCounter(&last_view_paint);
+        return 0;
+    }
+    if (message == WM_MOUSEMOVE && g_minimap_dragging && (wparam & MK_LBUTTON) && g_view && !g_graph_blocks.empty()) {
+        MSG newer{};
+        while (PeekMessageW(&newer, window, WM_MOUSEMOVE, WM_MOUSEMOVE, PM_REMOVE)) {
+            lparam = newer.lParam;
+        }
+        const int mx = GET_X_LPARAM(lparam);
+        const int my = GET_Y_LPARAM(lparam);
+        minimap_scroll_to(window, mx, my, grab_wx, grab_wy);
+        InvalidateRect(window, nullptr, FALSE);
+        UpdateWindow(window);
+        InvalidateRect(g_view, nullptr, FALSE);
+        LARGE_INTEGER now{};
+        QueryPerformanceCounter(&now);
+        const double elapsed_ms = qpc_freq.QuadPart
+            ? static_cast<double>(now.QuadPart - last_view_paint.QuadPart) * 1000.0 / static_cast<double>(qpc_freq.QuadPart)
+            : 16.0;
+        if (elapsed_ms >= 8.0) {
+            UpdateWindow(g_view);
+            last_view_paint = now;
+        }
         return 0;
     }
     if (message == WM_LBUTTONUP || message == WM_CAPTURECHANGED) {
         if (g_minimap_dragging) {
             g_minimap_dragging = false;
             if (GetCapture() == window) ReleaseCapture();
+            update_graph_scrollbars(g_view);
+            InvalidateRect(g_view, nullptr, FALSE);
+            UpdateWindow(g_view);
             InvalidateRect(window, nullptr, FALSE);
+            UpdateWindow(window);
             return 0;
         }
     }
