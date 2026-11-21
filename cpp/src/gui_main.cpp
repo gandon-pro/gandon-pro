@@ -1681,13 +1681,13 @@ LRESULT CALLBACK navband_proc(HWND window, UINT message, WPARAM wparam, LPARAM l
 }
 
 struct MinimapTransform { double scale{1}; double origin_x{10}, origin_y{10}; int world_width{1}, world_height{1}; };
-// Uniform scale (aspect ratio preserved) and centred, like IDA's graph overview.
+// Uniform scale (aspect ratio preserved, capped like IDA's graph overview) and centred.
 MinimapTransform minimap_transform(const RECT& client) {
     MinimapTransform t;
     const auto [world_width, world_height] = graph_content_size();
     t.world_width = (std::max)(1, world_width); t.world_height = (std::max)(1, world_height);
     const double map_width = (std::max)(1L, client.right - 20L), map_height = (std::max)(1L, client.bottom - 20L);
-    t.scale = (std::min)(map_width / t.world_width, map_height / t.world_height);
+    t.scale = (std::min)(0.22, (std::min)(map_width / t.world_width, map_height / t.world_height));
     t.origin_x = 10 + (map_width - t.world_width * t.scale) / 2.0;
     t.origin_y = 10 + (map_height - t.world_height * t.scale) / 2.0;
     return t;
@@ -1699,7 +1699,7 @@ void minimap_scroll_to(HWND window, int mouse_x, int mouse_y) {
     const double world_x = (std::max)(0.0, (std::min)(static_cast<double>(t.world_width), (mouse_x - t.origin_x) / t.scale));
     const double world_y = (std::max)(0.0, (std::min)(static_cast<double>(t.world_height), (mouse_y - t.origin_y) / t.scale));
     RECT view{}; GetClientRect(g_view, &view);
-    const double zoom = static_cast<double>(g_graph_zoom) / 100.0;
+    const double zoom = (std::max)(0.1, static_cast<double>(g_graph_zoom) / 100.0);
     g_graph_scroll_x = static_cast<int>(world_x * zoom - view.right / 2.0);
     g_graph_scroll_y = static_cast<int>(world_y * zoom - view.bottom / 2.0);
     clamp_graph_scroll(g_view);
@@ -1734,9 +1734,9 @@ LRESULT CALLBACK minimap_proc(HWND window, UINT message, WPARAM wparam, LPARAM l
         HDC dc = CreateCompatibleDC(target);
         HBITMAP bitmap = CreateCompatibleBitmap(target, cw, ch);
         HGDIOBJ old_bitmap = SelectObject(dc, bitmap);
-        HBRUSH background = CreateSolidBrush(THEMED_RGB(18, 22, 27));
-        FillRect(dc, &client, background); DeleteObject(background);
         if (g_graph_blocks.empty()) {
+            HBRUSH background = CreateSolidBrush(THEMED_RGB(18, 22, 27));
+            FillRect(dc, &client, background); DeleteObject(background);
             SetBkMode(dc, TRANSPARENT); SetTextColor(dc, THEMED_RGB(120, 132, 146));
             HFONT old_font = reinterpret_cast<HFONT>(SelectObject(dc, g_ui_font));
             RECT tr = client;
@@ -1746,47 +1746,54 @@ LRESULT CALLBACK minimap_proc(HWND window, UINT message, WPARAM wparam, LPARAM l
             const auto t = minimap_transform(client);
             const auto map_x = [&](int value) { return static_cast<int>(std::lround(t.origin_x + value * t.scale)); };
             const auto map_y = [&](int value) { return static_cast<int>(std::lround(t.origin_y + value * t.scale)); };
+
+            // Dimmed outside-viewport region + lighter visible viewport background (IDA Pro 9.5 style)
+            HBRUSH outside_bg = CreateSolidBrush(THEMED_RGB(122, 122, 122));
+            FillRect(dc, &client, outside_bg); DeleteObject(outside_bg);
+
+            RECT view{}; GetClientRect(g_view, &view);
+            const double zoom = (std::max)(0.1, static_cast<double>(g_graph_zoom) / 100.0);
+            RECT viewport{
+                map_x(static_cast<int>(g_graph_scroll_x / zoom)), map_y(static_cast<int>(g_graph_scroll_y / zoom)),
+                map_x(static_cast<int>((g_graph_scroll_x + view.right) / zoom)), map_y(static_cast<int>((g_graph_scroll_y + view.bottom) / zoom))};
+            RECT clipped{};
+            if (IntersectRect(&clipped, &viewport, &client) && clipped.right > clipped.left && clipped.bottom > clipped.top) {
+                HBRUSH inside_bg = CreateSolidBrush(THEMED_RGB(172, 172, 172));
+                FillRect(dc, &clipped, inside_bg); DeleteObject(inside_bg);
+                HBRUSH vp_border = CreateSolidBrush(THEMED_RGB(96, 96, 96));
+                FrameRect(dc, &clipped, vp_border); DeleteObject(vp_border);
+            }
+
             std::unordered_map<std::uint64_t, const GraphBlock*> by_start;
             for (const auto& block : g_graph_blocks) by_start[block.start] = &block;
             for (const auto& edge : g_graph_edges) {
                 const auto source = by_start.find(edge.from); const auto target_block = by_start.find(edge.to);
                 if (source == by_start.end() || target_block == by_start.end()) continue;
                 const auto* a = source->second; const auto* b = target_block->second;
-                const COLORREF color = edge.kind == GraphEdgeKind::TrueBranch ? THEMED_RGB(73, 190, 104)
-                    : edge.kind == GraphEdgeKind::FalseBranch ? THEMED_RGB(224, 92, 92) : THEMED_RGB(86, 157, 214);
+                const COLORREF color = edge.kind == GraphEdgeKind::TrueBranch ? RGB(45, 165, 75)
+                    : edge.kind == GraphEdgeKind::FalseBranch ? RGB(210, 65, 65) : RGB(45, 115, 225);
                 HPEN pen = CreatePen(PS_SOLID, 1, color); HGDIOBJ old = SelectObject(dc, pen);
                 const int sx = map_x(a->x + a->width / 2), sy = map_y(a->y + a->height), tx = map_x(b->x + b->width / 2), ty = map_y(b->y);
                 MoveToEx(dc, sx, sy, nullptr); LineTo(dc, sx, (sy + ty) / 2); LineTo(dc, tx, (sy + ty) / 2); LineTo(dc, tx, ty);
+                MoveToEx(dc, tx - 2, ty - 3, nullptr); LineTo(dc, tx, ty); LineTo(dc, tx + 3, ty - 3);
                 SelectObject(dc, old); DeleteObject(pen);
             }
             for (const auto& block : g_graph_blocks) {
                 RECT box{map_x(block.x), map_y(block.y), map_x(block.x + block.width), map_y(block.y + block.height)};
-                if (box.right - box.left < 3) box.right = box.left + 3;
-                if (box.bottom - box.top < 3) box.bottom = box.top + 3;
+                if (box.right - box.left < 4) box.right = box.left + 4;
+                if (box.bottom - box.top < 4) box.bottom = box.top + 4;
                 const bool active = block.start == g_current_address || std::any_of(block.instructions.begin(), block.instructions.end(),
                     [](const auto* instruction) { return instruction->address == g_current_address; });
-                COLORREF cap_color = active ? THEMED_RGB(53, 116, 240) : THEMED_RGB(78, 118, 158);
-                if (const auto tag = g_graph_colors.find(block.start); tag != g_graph_colors.end()) cap_color = tag->second;
-                HBRUSH body = CreateSolidBrush(THEMED_RGB(32, 39, 47));
+                COLORREF fill_color = active ? THEMED_RGB(98, 93, 90) : THEMED_RGB(46, 46, 46);
+                if (const auto tag = g_graph_colors.find(block.start); tag != g_graph_colors.end()) fill_color = tag->second;
+                RECT shadow = box; OffsetRect(&shadow, 1, 1);
+                HBRUSH sh_br = CreateSolidBrush(THEMED_RGB(88, 88, 88));
+                FillRect(dc, &shadow, sh_br); DeleteObject(sh_br);
+                HBRUSH body = CreateSolidBrush(fill_color);
                 FillRect(dc, &box, body); DeleteObject(body);
-                RECT cap = box;
-                cap.bottom = (std::min)(box.bottom, box.top + (box.bottom - box.top >= 5 ? 3 : 2));
-                HBRUSH cap_br = CreateSolidBrush(cap_color);
-                FillRect(dc, &cap, cap_br); DeleteObject(cap_br);
-                HBRUSH outline = CreateSolidBrush(active ? THEMED_RGB(53, 116, 240) : THEMED_RGB(62, 74, 86));
+                HBRUSH outline = CreateSolidBrush(THEMED_RGB(26, 26, 26));
                 FrameRect(dc, &box, outline); DeleteObject(outline);
             }
-            RECT view{}; GetClientRect(g_view, &view);
-            const double zoom = (std::max)(0.1, static_cast<double>(g_graph_zoom) / 100.0);
-            RECT viewport{
-                map_x(static_cast<int>(g_graph_scroll_x / zoom)), map_y(static_cast<int>(g_graph_scroll_y / zoom)),
-                map_x(static_cast<int>((g_graph_scroll_x + view.right) / zoom)), map_y(static_cast<int>((g_graph_scroll_y + view.bottom) / zoom))};
-            RECT clamp_area{1, 1, (std::max)(2L, client.right - 1), (std::max)(2L, client.bottom - 1)};
-            IntersectRect(&viewport, &viewport, &clamp_area);
-            HPEN frame = CreatePen(PS_SOLID, 2, THEMED_RGB(92, 157, 255)); HGDIOBJ old = SelectObject(dc, frame);
-            HGDIOBJ old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-            if (viewport.right > viewport.left && viewport.bottom > viewport.top) Rectangle(dc, viewport.left, viewport.top, viewport.right, viewport.bottom);
-            SelectObject(dc, old_brush); SelectObject(dc, old); DeleteObject(frame);
         }
         BitBlt(target, 0, 0, client.right, client.bottom, dc, 0, 0, SRCCOPY);
         SelectObject(dc, old_bitmap); DeleteObject(bitmap); DeleteDC(dc);
@@ -7536,6 +7543,11 @@ LRESULT CALLBACK bar_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
     struct Hit { RECT rect; Panel* panel; };
     static std::vector<Hit> hits[3];
     static Panel* drag_panel = nullptr; static bool drag_active = false; static POINT drag_start{}; static int drag_zone = -1;
+    static int hover_btn[3] = {-1, -1, -1}; // 0=float, 1=close
+    const auto btn_rects = [](const RECT& client, RECT& float_rc, RECT& close_rc) {
+        close_rc = {client.right - 24, 3, client.right - 4, (std::max)(4L, client.bottom - 3)};
+        float_rc = {client.right - 46, 3, client.right - 26, (std::max)(4L, client.bottom - 3)};
+    };
     const auto hit_at = [&](int x, int y) -> Panel* { for (const auto& h : hits[area]) if (x >= h.rect.left && x < h.rect.right && y >= h.rect.top && y < h.rect.bottom) return h.panel; return nullptr; };
     switch (message) {
     case WM_ERASEBKGND: return 1;
@@ -7547,10 +7559,12 @@ LRESULT CALLBACK bar_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
         hits[area].clear();
         int x = 0;
         Panel* current = active(area);
+        const int max_tab_x = (current && client.right > 90) ? static_cast<int>(client.right) - 50 : static_cast<int>(client.right);
         for (auto* p : docked(area)) {
             const std::wstring text = title_of(*p);
             SIZE extent{}; GetTextExtentPoint32W(dc, text.c_str(), static_cast<int>(text.size()), &extent);
-            RECT tab{x, 0, x + extent.cx + 28, client.bottom};
+            RECT tab{x, 0, (std::min)(max_tab_x, x + static_cast<int>(extent.cx) + 28), client.bottom};
+            if (tab.right <= tab.left) break;
             const bool is_active = p == current;
             HBRUSH fill = CreateSolidBrush(is_active ? THEMED_RGB(30, 34, 40) : THEMED_RGB(24, 27, 32)); FillRect(dc, &tab, fill); DeleteObject(fill);
             if (is_active) { RECT line{tab.left, tab.bottom - 2, tab.right, tab.bottom}; HBRUSH accent = CreateSolidBrush(THEMED_RGB(0, 122, 204)); FillRect(dc, &line, accent); DeleteObject(accent); }
@@ -7560,18 +7574,66 @@ LRESULT CALLBACK bar_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
             hits[area].push_back({tab, p});
             x = tab.right;
         }
+        if (current && client.right > 90) {
+            RECT float_rc{}, close_rc{};
+            btn_rects(client, float_rc, close_rc);
+            for (int bi = 0; bi < 2; ++bi) {
+                const RECT& brc = (bi == 0) ? float_rc : close_rc;
+                const bool hov = (hover_btn[area] == bi);
+                HBRUSH bbg = CreateSolidBrush(hov ? THEMED_RGB(56, 62, 70) : THEMED_RGB(36, 40, 46));
+                FillRect(dc, &brc, bbg); DeleteObject(bbg);
+                HPEN pen = CreatePen(PS_SOLID, 1, hov ? THEMED_RGB(235, 240, 245) : THEMED_RGB(165, 175, 185));
+                HGDIOBJ op = SelectObject(dc, pen);
+                HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
+                const int cx = (brc.left + brc.right) / 2, cy = (brc.top + brc.bottom) / 2;
+                if (bi == 0) {
+                    Rectangle(dc, cx - 3, cy - 1, cx + 2, cy + 4);
+                    MoveToEx(dc, cx - 1, cy - 1, nullptr); LineTo(dc, cx - 1, cy - 3);
+                    LineTo(dc, cx + 4, cy - 3); LineTo(dc, cx + 4, cy + 2); LineTo(dc, cx + 2, cy + 2);
+                } else {
+                    MoveToEx(dc, cx - 3, cy - 3, nullptr); LineTo(dc, cx + 4, cy + 4);
+                    MoveToEx(dc, cx + 3, cy - 3, nullptr); LineTo(dc, cx - 4, cy + 4);
+                }
+                SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(pen);
+            }
+        }
         SelectObject(dc, old_font);
         EndPaint(hwnd, &ps); return 0;
     }
-    case WM_LBUTTONDOWN:
-        if (Panel* p = hit_at(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam))) {
+    case WM_LBUTTONDOWN: {
+        const POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        RECT client{}; GetClientRect(hwnd, &client);
+        Panel* cur = active(area);
+        if (cur && client.right > 90) {
+            RECT float_rc{}, close_rc{};
+            btn_rects(client, float_rc, close_rc);
+            if (PtInRect(&close_rc, pt)) { close_panel(*cur); return 0; }
+            if (PtInRect(&float_rc, pt)) { make_floating(*cur); return 0; }
+        }
+        if (Panel* p = hit_at(pt.x, pt.y)) {
             active_id[area] = p->id; relayout(); SetFocus(p->content);
-            drag_panel = p; drag_active = false; drag_start = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)}; SetCapture(hwnd);
+            drag_panel = p; drag_active = false; drag_start = pt; SetCapture(hwnd);
         }
         return 0;
-    case WM_MOUSEMOVE:
+    }
+    case WM_MOUSELEAVE:
+        if (hover_btn[area] != -1) { hover_btn[area] = -1; InvalidateRect(hwnd, nullptr, FALSE); }
+        return 0;
+    case WM_MOUSEMOVE: {
+        const POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        if (!drag_panel) {
+            TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0}; TrackMouseEvent(&tme);
+            RECT client{}; GetClientRect(hwnd, &client);
+            int next_hov = -1;
+            if (active(area) && client.right > 90) {
+                RECT float_rc{}, close_rc{}; btn_rects(client, float_rc, close_rc);
+                if (PtInRect(&float_rc, pt)) next_hov = 0;
+                else if (PtInRect(&close_rc, pt)) next_hov = 1;
+            }
+            if (next_hov != hover_btn[area]) { hover_btn[area] = next_hov; InvalidateRect(hwnd, nullptr, FALSE); }
+        }
         if (drag_panel && (wparam & MK_LBUTTON)) {
-            const int dx = GET_X_LPARAM(lparam) - drag_start.x, dy = GET_Y_LPARAM(lparam) - drag_start.y;
+            const int dx = pt.x - drag_start.x, dy = pt.y - drag_start.y;
             if (!drag_active && dx * dx + dy * dy > 64) drag_active = true;
             if (drag_active) {
                 POINT cursor{}; GetCursorPos(&cursor);
@@ -7581,6 +7643,7 @@ LRESULT CALLBACK bar_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
             }
         }
         return 0;
+    }
     case WM_LBUTTONUP:
         if (drag_panel) {
             Panel* p = drag_panel; const bool was_dragging = drag_active; const int zone = drag_zone;
