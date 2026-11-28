@@ -170,7 +170,7 @@ cpp/
 
 Gandon-PRO is under active development. Instruction coverage and analysis results depend on the input architecture and binary. Decompiled output is an analysis aid and should be checked against the disassembly.
 
-For release 3.4, the x64 GUI and CLI compiled successfully; all four CTest cases and the separate type tests passed. CLI/text-view smoke checks and the embedded administrator manifest were also verified. Interactive GUI operation, ScyllaHide injection, and live kernel-driver loading were not runtime-tested during release preparation.
+For release 3.2, the x64 GUI and CLI compiled successfully; all four CTest cases and the separate type tests passed. CLI/text-view smoke checks and the embedded administrator manifest were also verified. Interactive GUI operation, ScyllaHide injection, and live kernel-driver loading were not runtime-tested during release preparation.
 
 ## Contribute
 
@@ -186,6 +186,6 @@ Gandon-PRO uses components with their own licenses:
 - **Unicorn:** see its [license notice](cpp/third_party/licenses/Unicorn-COPYING) and [LGPL text](cpp/third_party/licenses/Unicorn-COPYING.LGPL2).
 - **ScyllaHide:** [GNU GPL v3](cpp/third_party/licenses/ScyllaHide-GPL-3.0.txt).
 
-The 3.4 release includes corresponding ScyllaHide and Unicorn source archives, plus application objects for relinking with a modified Unicorn engine.
+The 3.2 release includes corresponding ScyllaHide and Unicorn source archives, plus application objects for relinking with a modified Unicorn engine.
 
 A project-wide license for Gandon-PRO itself has not yet been specified in this repository. The third-party license notices do not grant a license to unrelated project code.

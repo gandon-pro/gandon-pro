@@ -106,6 +106,7 @@ constexpr int ID_INVERT_BRANCH = 1414, ID_FORCE_BRANCH = 1415, ID_NOP_BRANCH = 1
 constexpr int ID_DUMP_MODULE = 1419, ID_DETECT_VM = 1420, ID_EMULATE_DECRYPT = 1421;
 constexpr int ID_ANALYZE_DOTNET = 1422, ID_TRACE_VM = 1423;
 constexpr int ID_RECOVER_RTTI = 1424, ID_ANALYZE_DRIVER = 1425, ID_DEVIRT_VM = 1426;
+constexpr int ID_DECOMP_LANG_C = 1427, ID_DECOMP_LANG_CPP = 1428, ID_DECOMP_LANG_CS = 1429;
 HMENU build_patch_submenu();  // defined with the semantic patch operations below
 constexpr int ID_CONTEXT_FOLLOW = 1390, ID_CONTEXT_COPY = 1391, ID_CONTEXT_FOLLOW_TARGET = 1392;
 constexpr int ID_COLOR_DEFAULT = 1393, ID_COLOR_GREEN = 1394, ID_COLOR_RED = 1395, ID_COLOR_BLUE = 1396;
@@ -221,6 +222,7 @@ std::unique_ptr<gandon::LowLevelIlEmulator> g_llil_emulator;
 std::wstring g_llil_status;
 std::wstring g_llil_memory_status;
 std::wstring g_listing, g_pseudocode, g_xrefs, g_memory_map;
+gandon::DecompileLanguage g_decompile_lang = gandon::DecompileLanguage::Cpp;
 std::vector<std::uint8_t> g_memory_snapshot;
 std::uint64_t g_memory_snapshot_address = 0;
 std::uint64_t g_current_address = 0;
@@ -685,6 +687,165 @@ std::optional<std::wstring> prompt_text(HWND owner, const wchar_t* title, const 
     const auto result = DialogBoxIndirectParamW(g_instance, reinterpret_cast<DLGTEMPLATE*>(data.data()), owner, prompt_proc, reinterpret_cast<LPARAM>(&context));
     if (result == -1) { MessageBoxW(owner, L"Не удалось создать диалог ввода.", title, MB_ICONERROR); return std::nullopt; }
     if (result == IDOK) return context.value;
+    return std::nullopt;
+}
+
+struct DecompileDialogContext {
+    std::wstring header_text;
+    gandon::DecompileLanguage lang{gandon::DecompileLanguage::Cpp};
+};
+
+INT_PTR CALLBACK decompile_dialog_proc(HWND dialog, UINT message, WPARAM wparam, LPARAM lparam) {
+    auto* context = reinterpret_cast<DecompileDialogContext*>(GetWindowLongPtrW(dialog, DWLP_USER));
+    switch (message) {
+    case WM_INITDIALOG: {
+        SetWindowLongPtrW(dialog, DWLP_USER, lparam);
+        context = reinterpret_cast<DecompileDialogContext*>(lparam);
+        const BOOL dark = g_light_theme ? FALSE : TRUE;
+        DwmSetWindowAttribute(dialog, 20, &dark, sizeof(dark));
+        SetDlgItemTextW(dialog, 100, context->header_text.c_str());
+        HWND list = GetDlgItem(dialog, 101);
+        SendMessageW(list, LB_SETITEMHEIGHT, 0, 22);
+        SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Decompile to C"));
+        SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Decompile to C++"));
+        SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Decompile to C#"));
+        const int initial_sel = context->lang == gandon::DecompileLanguage::C ? 0
+                              : context->lang == gandon::DecompileLanguage::CSharp ? 2 : 1;
+        SendMessageW(list, LB_SETCURSEL, initial_sel, 0);
+        SendMessageW(dialog, DM_SETDEFID, IDOK, 0);
+        RECT own{}, box{};
+        GetWindowRect(GetParent(dialog) ? GetParent(dialog) : GetDesktopWindow(), &own);
+        GetWindowRect(dialog, &box);
+        SetWindowPos(dialog, nullptr,
+                     own.left + ((own.right - own.left) - (box.right - box.left)) / 2,
+                     own.top + ((own.bottom - own.top) - (box.bottom - box.top)) / 3,
+                     0, 0, SWP_NOSIZE | SWP_NOZORDER);
+        SetFocus(list);
+        return FALSE;
+    }
+    case WM_CTLCOLORDLG:
+        return g_light_theme ? static_cast<INT_PTR>(reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_BTNFACE)))
+                             : reinterpret_cast<INT_PTR>(g_background);
+    case WM_CTLCOLORSTATIC: {
+        HDC dc = reinterpret_cast<HDC>(wparam);
+        SetTextColor(dc, prompt_text_color());
+        if (g_light_theme) { SetBkColor(dc, GetSysColor(COLOR_BTNFACE)); return reinterpret_cast<INT_PTR>(GetSysColorBrush(COLOR_BTNFACE)); }
+        SetBkColor(dc, THEMED_RGB(30, 34, 40));
+        return reinterpret_cast<INT_PTR>(g_background);
+    }
+    case WM_CTLCOLORLISTBOX: {
+        HDC dc = reinterpret_cast<HDC>(wparam);
+        SetTextColor(dc, prompt_text_color());
+        if (g_light_theme) { SetBkColor(dc, RGB(255, 255, 255)); return reinterpret_cast<INT_PTR>(GetStockObject(WHITE_BRUSH)); }
+        SetBkColor(dc, THEMED_RGB(24, 27, 32));
+        return reinterpret_cast<INT_PTR>(g_panel);
+    }
+    case WM_DRAWITEM: {
+        const auto& item = *reinterpret_cast<DRAWITEMSTRUCT*>(lparam);
+        if (item.CtlID == 101 && item.itemID != static_cast<UINT>(-1)) {
+            const bool selected = (item.itemState & ODS_SELECTED) != 0;
+            const COLORREF bg = g_light_theme
+                ? (selected ? RGB(204, 228, 247) : RGB(255, 255, 255))
+                : (selected ? THEMED_RGB(48, 56, 68) : THEMED_RGB(24, 27, 32));
+            HBRUSH br = CreateSolidBrush(bg);
+            FillRect(item.hDC, &item.rcItem, br);
+            DeleteObject(br);
+            if (selected) {
+                HBRUSH edge = CreateSolidBrush(RGB(0, 122, 204));
+                FrameRect(item.hDC, &item.rcItem, edge);
+                DeleteObject(edge);
+            }
+            static constexpr const wchar_t* kLabels[] = {L"Decompile to C", L"Decompile to C++", L"Decompile to C#"};
+            static constexpr const wchar_t* kTags[] = {L"c", L"cpp", L"cs"};
+            const wchar_t* label = item.itemID < 3 ? kLabels[item.itemID] : L"";
+            const wchar_t* tag = item.itemID < 3 ? kTags[item.itemID] : L"";
+            SetBkMode(item.hDC, TRANSPARENT);
+            HFONT old_font = reinterpret_cast<HFONT>(SelectObject(item.hDC, g_ui_font ? g_ui_font : GetStockObject(DEFAULT_GUI_FONT)));
+            RECT left_rc = item.rcItem;
+            left_rc.left += 10;
+            SetTextColor(item.hDC, prompt_text_color());
+            DrawTextW(item.hDC, label, -1, &left_rc, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX);
+            RECT right_rc = item.rcItem;
+            right_rc.right -= 12;
+            SetTextColor(item.hDC, g_light_theme ? RGB(100, 100, 100) : RGB(150, 165, 180));
+            DrawTextW(item.hDC, tag, -1, &right_rc, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX);
+            SelectObject(item.hDC, old_font);
+            return TRUE;
+        }
+        prompt_draw_button(item);
+        return TRUE;
+    }
+    case WM_COMMAND:
+        if (!context) break;
+        if (LOWORD(wparam) == 101 && HIWORD(wparam) == LBN_DBLCLK) {
+            SendMessageW(dialog, WM_COMMAND, IDOK, 0);
+            return TRUE;
+        }
+        if (LOWORD(wparam) == IDOK) {
+            const LRESULT sel = SendDlgItemMessageW(dialog, 101, LB_GETCURSEL, 0, 0);
+            context->lang = sel == 0 ? gandon::DecompileLanguage::C
+                          : sel == 2 ? gandon::DecompileLanguage::CSharp
+                          : gandon::DecompileLanguage::Cpp;
+            EndDialog(dialog, IDOK);
+            return TRUE;
+        }
+        if (LOWORD(wparam) == IDCANCEL) {
+            EndDialog(dialog, IDCANCEL);
+            return TRUE;
+        }
+        break;
+    }
+    return FALSE;
+}
+
+std::optional<gandon::DecompileLanguage> prompt_decompile_language(HWND owner, gandon::DecompileLanguage current, std::uint64_t address) {
+    std::vector<BYTE> data(sizeof(DLGTEMPLATE), 0);
+    {
+        DLGTEMPLATE header{};
+        header.style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_SETFONT;
+        header.dwExtendedStyle = WS_EX_DLGMODALFRAME;
+        header.cdit = 4;
+        header.x = 10;
+        header.y = 10;
+        header.cx = 230;
+        header.cy = 108;
+        std::memcpy(data.data(), &header, sizeof(header));
+    }
+    prompt_word(data, 0);
+    prompt_word(data, 0);
+    prompt_string(data, L"Decompile function");
+    prompt_word(data, 9);
+    prompt_string(data, L"Segoe UI");
+    auto add_control = [&](DWORD style, short x, short y, short cx, short cy, WORD id, WORD klass, const wchar_t* text) {
+        while (data.size() & 3u) data.push_back(0);
+        DLGITEMTEMPLATE item{};
+        item.style = style;
+        item.dwExtendedStyle = 0;
+        item.x = x;
+        item.y = y;
+        item.cx = cx;
+        item.cy = cy;
+        item.id = id;
+        const auto at = data.size();
+        data.resize(at + sizeof(item));
+        std::memcpy(data.data() + at, &item, sizeof(item));
+        prompt_word(data, 0xffff);
+        prompt_word(data, klass);
+        prompt_string(data, text);
+        prompt_word(data, 0);
+    };
+    add_control(WS_CHILD | WS_VISIBLE | SS_LEFT, 10, 9, 210, 10, 100, 0x0082, L"");
+    add_control(WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+                10, 23, 210, 52, 101, 0x0083, L"");
+    add_control(WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0000000BL /* BS_OWNERDRAW */, 100, 84, 56, 16, IDOK, 0x0080, L"OK");
+    add_control(WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x0000000BL, 164, 84, 56, 16, IDCANCEL, 0x0080, L"Cancel");
+
+    wchar_t hdr[128]{};
+    swprintf_s(hdr, L"Decompile function at 0x%llX as:", static_cast<unsigned long long>(address));
+    DecompileDialogContext context{hdr, current};
+    const auto result = DialogBoxIndirectParamW(g_instance, reinterpret_cast<DLGTEMPLATE*>(data.data()),
+                                                owner, decompile_dialog_proc, reinterpret_cast<LPARAM>(&context));
+    if (result == IDOK) return context.lang;
     return std::nullopt;
 }
 
@@ -2534,7 +2695,7 @@ const char* native_plugin_decompile_at(void*, uint64_t address, int address_comm
         const auto result = gandon::decompile_function_at(*g_database, address, address_comments != 0, [](std::uint64_t a) -> std::string {
             const auto label = g_custom_labels.find(a);
             return label == g_custom_labels.end() ? std::string{} : utf8_from_wide(label->second);
-        }, &g_noreturn);
+        }, &g_noreturn, g_decompile_lang);
         ok = result.ok ? 1 : 0;
         buffer = result.ok ? result.text : result.error;
     });
@@ -2958,7 +3119,25 @@ gandon::McpHostCallbacks mcp_build_callbacks() {
             const auto d = gandon::decompile_function_at(*g_database, address, address_comments, [](std::uint64_t a) -> std::string {
                 const auto it = g_custom_labels.find(a);
                 return it == g_custom_labels.end() ? std::string{} : utf8_from_wide(it->second);
-            }, &g_noreturn);
+            }, &g_noreturn, g_decompile_lang);
+            res.ok = d.ok;
+            res.text = d.ok ? d.text : d.error;
+        });
+        return res;
+    };
+    cb.decompile_at_lang = [](std::uint64_t address, bool address_comments, const std::string& language) -> gandon::McpDecompileResult {
+        gandon::McpDecompileResult res;
+        run_on_ui_thread([&] {
+            if (!g_database || !address) return;
+            res.has_binary = true;
+            gandon::DecompileLanguage lang = g_decompile_lang;
+            if (language == "c" || language == "C") lang = gandon::DecompileLanguage::C;
+            else if (language == "cpp" || language == "c++" || language == "C++") lang = gandon::DecompileLanguage::Cpp;
+            else if (language == "cs" || language == "csharp" || language == "c#" || language == "C#") lang = gandon::DecompileLanguage::CSharp;
+            const auto d = gandon::decompile_function_at(*g_database, address, address_comments, [](std::uint64_t a) -> std::string {
+                const auto it = g_custom_labels.find(a);
+                return it == g_custom_labels.end() ? std::string{} : utf8_from_wide(it->second);
+            }, &g_noreturn, lang);
             res.ok = d.ok;
             res.text = d.ok ? d.text : d.error;
         });
@@ -3548,7 +3727,7 @@ std::wstring pseudocode_text_at(const gandon::AnalysisDatabase& db, std::uint64_
             if (label == g_custom_labels.end()) return {};
             std::string narrow; for (const wchar_t c : label->second) narrow.push_back(c < 0x80 ? static_cast<char>(c) : '_');
             return narrow;
-        }, &g_noreturn);
+        }, &g_noreturn, g_decompile_lang);
         if (structured.ok) {
             std::wstring text;
             text.reserve(structured.text.size() + 256);
@@ -11197,8 +11376,18 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         AppendMenuW(live_menu, MF_STRING | MF_UNCHECKED, ID_TRACE_TOGGLE, L"Trace Debug Events");
         AppendMenuW(live_menu, MF_STRING, ID_EXPORT_TRACE, L"Export Trace...");
 
+        HMENU decomp_lang_menu = CreatePopupMenu();
+        AppendMenuW(decomp_lang_menu, MF_STRING, ID_DECOMP_LANG_C, L"C (Classic)");
+        AppendMenuW(decomp_lang_menu, MF_STRING, ID_DECOMP_LANG_CPP, L"C++");
+        AppendMenuW(decomp_lang_menu, MF_STRING, ID_DECOMP_LANG_CS, L"C# (Unsafe)");
+        const UINT active_lang_id = g_decompile_lang == gandon::DecompileLanguage::C ? ID_DECOMP_LANG_C
+                                  : g_decompile_lang == gandon::DecompileLanguage::CSharp ? ID_DECOMP_LANG_CS
+                                  : ID_DECOMP_LANG_CPP;
+        CheckMenuRadioItem(decomp_lang_menu, ID_DECOMP_LANG_C, ID_DECOMP_LANG_CS, active_lang_id, MF_BYCOMMAND);
+
         HMENU tools = CreatePopupMenu();
         AppendMenuW(tools, MF_STRING, ID_DECOMPILE, L"Decompile to Pseudocode\tF5");
+        AppendMenuW(tools, MF_POPUP, reinterpret_cast<UINT_PTR>(decomp_lang_menu), L"Decompiler Language");
         AppendMenuW(tools, MF_STRING, ID_SIGMAKER, L"SigMaker: Generate Signature\tCtrl+B");
         AppendMenuW(tools, MF_STRING, ID_SEARCH_SIGNATURE, L"Search Signature Pattern...\tCtrl+Shift+F");
         AppendMenuW(tools, MF_STRING, ID_COMPARE, L"Compare Binary...");
@@ -11480,6 +11669,21 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         if (id == ID_EMULATE_DECRYPT) { emulate_decryptor(window); return 0; }
         if (id == ID_ANALYZE_DOTNET) { analyze_dotnet_here(window); return 0; }
         if (id == ID_RECOVER_RTTI) { recover_rtti_here(window); return 0; }
+        if (id == ID_DECOMP_LANG_C || id == ID_DECOMP_LANG_CPP || id == ID_DECOMP_LANG_CS) {
+            g_decompile_lang = id == ID_DECOMP_LANG_C ? gandon::DecompileLanguage::C
+                             : id == ID_DECOMP_LANG_CS ? gandon::DecompileLanguage::CSharp
+                             : gandon::DecompileLanguage::Cpp;
+            CheckMenuRadioItem(GetMenu(window), ID_DECOMP_LANG_C, ID_DECOMP_LANG_CS, id, MF_BYCOMMAND);
+            if (g_database) {
+                g_pseudocode = pseudocode_text_at(*g_database, g_current_address ? g_current_address : g_database->image().entry_point);
+                if (g_tabs && TabCtrl_GetCurSel(g_tabs) == 2) select_view(window, 2);
+            }
+            SetWindowTextW(g_status,
+                g_decompile_lang == gandon::DecompileLanguage::C ? L"Decompiler language: C"
+                : g_decompile_lang == gandon::DecompileLanguage::CSharp ? L"Decompiler language: C#"
+                : L"Decompiler language: C++");
+            return 0;
+        }
         if (id == ID_ANALYZE_DRIVER) { analyze_driver_here(window); return 0; }
         // Live-memory commands use flat dispatch to avoid MSVC's nested-block limit.
         if (id == ID_POINTER_SCAN) { live_pointer_scan(window, false); return 0; }
@@ -11626,7 +11830,24 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
         if (id == ID_TOGGLE_GRAPH_LIST) { toggle_graph_listing(window); return 0; }
         if (id == ID_FIT_GRAPH) { fit_graph(window); return 0; }
         if (id == ID_TOGGLE_MINIMAP) { toggle_minimap(window); return 0; }
-        if (id == ID_DECOMPILE) { if (g_database) g_pseudocode = pseudocode_text_at(*g_database, g_current_address ? g_current_address : g_database->image().entry_point); select_view(window, 2); return 0; }
+        if (id == ID_DECOMPILE) {
+            if (!g_database) { select_view(window, 2); return 0; }
+            const std::uint64_t target_addr = g_current_address ? g_current_address : g_database->image().entry_point;
+            const auto chosen = prompt_decompile_language(window, g_decompile_lang, target_addr);
+            if (!chosen) return 0;
+            g_decompile_lang = *chosen;
+            const UINT lang_cmd = g_decompile_lang == gandon::DecompileLanguage::C ? ID_DECOMP_LANG_C
+                                : g_decompile_lang == gandon::DecompileLanguage::CSharp ? ID_DECOMP_LANG_CS
+                                : ID_DECOMP_LANG_CPP;
+            CheckMenuRadioItem(GetMenu(window), ID_DECOMP_LANG_C, ID_DECOMP_LANG_CS, lang_cmd, MF_BYCOMMAND);
+            g_pseudocode = pseudocode_text_at(*g_database, target_addr);
+            select_view(window, 2);
+            SetWindowTextW(g_status,
+                g_decompile_lang == gandon::DecompileLanguage::C ? L"Decompiled to C"
+                : g_decompile_lang == gandon::DecompileLanguage::CSharp ? L"Decompiled to C#"
+                : L"Decompiled to C++");
+            return 0;
+        }
         if (id == ID_STEP_INTO) { step_debugger(window, false); return 0; }
         if (id == ID_STEP_OVER) { step_debugger(window, true); return 0; }
         if (id == ID_BP_MANAGER) { show_breakpoint_manager(window); return 0; }
@@ -11684,6 +11905,15 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
             AppendMenuW(context, MF_STRING, ID_LIST_XREFS, L"Jump to Xrefs to Operand...\tX");
             AppendMenuW(context, MF_STRING, ID_XREFS_FROM, L"Jump to Xrefs from...\tCtrl+J");
             AppendMenuW(context, MF_STRING, ID_DECOMPILE, L"Decompile Function (Pseudocode)\tF5");
+            HMENU ctx_lang = CreatePopupMenu();
+            AppendMenuW(ctx_lang, MF_STRING, ID_DECOMP_LANG_C, L"C (Classic)");
+            AppendMenuW(ctx_lang, MF_STRING, ID_DECOMP_LANG_CPP, L"C++");
+            AppendMenuW(ctx_lang, MF_STRING, ID_DECOMP_LANG_CS, L"C# (Unsafe)");
+            const UINT ctx_active_lang = g_decompile_lang == gandon::DecompileLanguage::C ? ID_DECOMP_LANG_C
+                                       : g_decompile_lang == gandon::DecompileLanguage::CSharp ? ID_DECOMP_LANG_CS
+                                       : ID_DECOMP_LANG_CPP;
+            CheckMenuRadioItem(ctx_lang, ID_DECOMP_LANG_C, ID_DECOMP_LANG_CS, ctx_active_lang, MF_BYCOMMAND);
+            AppendMenuW(context, MF_POPUP, reinterpret_cast<UINT_PTR>(ctx_lang), L"Decompiler Language");
             AppendMenuW(context, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(context, MF_STRING, ID_RENAME_LABEL, L"Rename...\tN");
             AppendMenuW(context, MF_STRING, ID_ADD_COMMENT, L"Add Comment...\t;");

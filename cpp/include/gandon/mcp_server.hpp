@@ -46,6 +46,7 @@ struct McpHostCallbacks {
     std::function<std::vector<McpInstructionInfo>(std::uint64_t address, std::size_t count)> disasm_at;
     std::function<std::optional<std::string>(std::uint64_t address)> listing_at;
     std::function<McpDecompileResult(std::uint64_t address, bool address_comments)> decompile_at;
+    std::function<McpDecompileResult(std::uint64_t address, bool address_comments, const std::string& language)> decompile_at_lang;
     std::function<std::vector<McpXrefInfo>(std::uint64_t address, const std::string& direction)> xrefs_at;
 
     std::function<std::optional<std::string>(std::size_t min_length)> strings_text;

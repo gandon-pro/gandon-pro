@@ -26,6 +26,7 @@ gandon::DecompileResult decompile_bytes(const std::uint8_t* bytes, std::size_t s
                               static_cast<std::uint32_t>(rva), static_cast<std::uint32_t>(size + 0x100), 0x60000020});
     const auto instructions = gandon::decode_instructions(image, address, 512);
     gandon::DecompilerOptions options;
+    options.language = gandon::DecompileLanguage::C;
     options.windows_abi = false;
     return gandon::decompile_function(image, name, address, instructions, options);
 }
@@ -45,6 +46,7 @@ gandon::DecompileResult decompile_arm(const std::uint8_t* bytes, std::size_t siz
                               static_cast<std::uint32_t>(rva), static_cast<std::uint32_t>(size + 0x100), 0x60000020});
     const auto instructions = gandon::decode_instructions(image, address, 512);
     gandon::DecompilerOptions options;
+    options.language = gandon::DecompileLanguage::C;
     options.windows_abi = false;
     return gandon::decompile_function(image, name, address, instructions, options);
 }
@@ -188,6 +190,7 @@ void test_winapi_prototype_types_argument_casts() {
                               static_cast<std::uint32_t>(rva), static_cast<std::uint32_t>(sizeof k_bytes + 0x100), 0x60000020});
     const auto instructions = gandon::decode_instructions(image, address, 64);
     gandon::DecompilerOptions options;
+    options.language = gandon::DecompileLanguage::C;
     options.windows_abi = true;
     options.name_of = [](std::uint64_t a) -> std::string { return a == 0x40100A ? "CreateFileW" : std::string(); };
     const auto r = gandon::decompile_function(image, "opener", address, instructions, options);
@@ -234,6 +237,7 @@ void test_security_cookie_check_is_elided() {
                               static_cast<std::uint32_t>(rva), static_cast<std::uint32_t>(sizeof k_bytes + 0x100), 0x60000020});
     const auto instructions = gandon::decode_instructions(image, address, 64);
     gandon::DecompilerOptions options;
+    options.language = gandon::DecompileLanguage::C;
     options.windows_abi = true;
     options.name_of = [](std::uint64_t a) -> std::string { return a == 0x40100A ? "__security_check_cookie" : std::string(); };
     const auto r = gandon::decompile_function(image, "guarded", address, instructions, options);
@@ -262,6 +266,7 @@ void test_interprocedural_arg_count_from_callee() {
                               static_cast<std::uint32_t>(rva), static_cast<std::uint32_t>(sizeof k_bytes + 0x100), 0x60000020});
     const auto instructions = gandon::decode_instructions(image, address, 64);
     gandon::DecompilerOptions options;
+    options.language = gandon::DecompileLanguage::C;
     options.windows_abi = true;
     options.arg_count_of = [](std::uint64_t a) -> int { return a == 0x401010 ? 3 : -1; };
     const auto r = gandon::decompile_function(image, "caller", address, instructions, options);
@@ -286,6 +291,68 @@ void test_unsupported_architecture_is_rejected() {
     const auto r = gandon::decompile_function(image, "f", 0x1000, none);
     assert(!r.ok && !r.error.empty());
 }
+
+void test_cpp_and_csharp_language_modes() {
+    // 1. Virtual call + RTTI class/method reconstruction in C++ and C#
+    gandon::BinaryImage pe;
+    pe.format = gandon::BinaryFormat::PE;
+    pe.architecture = gandon::MachineArchitecture::X64;
+    pe.is_64_bit = true;
+    pe.image_base = 0x140000000;
+    pe.entry_point = 0x140001000;
+
+    const std::vector<gandon::Instruction> vcall_insns = {
+        {0x140001000, 3, "mov", "rax, qword ptr [rcx]", {}},
+        {0x140001003, 5, "mov", "edx, 5", {}},
+        {0x140001008, 2, "call", "qword ptr [rax]", {}},
+        {0x14000100A, 1, "ret", "", {}},
+    };
+
+    gandon::DecompilerOptions opts;
+    opts.windows_abi = true;
+    opts.vtable_class_at[0x140010000] = "ui::Widget";
+    opts.method_owner[0x140001000] = {"ui::Widget", 1, 0x140010000};
+    opts.vtable_methods[0x140010000] = {0x140002000};
+    opts.name_of = [](std::uint64_t a) -> std::string {
+        if (a == 0x140002000) return "?Update@Widget@ui@@UEAAXH@Z";
+        return {};
+    };
+
+    opts.language = gandon::DecompileLanguage::Cpp;
+    const auto cpp_res = gandon::decompile_function(pe, "sub_140001000", 0x140001000, vcall_insns, opts);
+    if (!cpp_res.ok || !contains(cpp_res.text, "// C++ class: ui::Widget") || !contains(cpp_res.text, "this->Update(5)")) {
+        fail("test_cpp_and_csharp_language_modes (C++ vcall)", cpp_res.text);
+    }
+
+    opts.language = gandon::DecompileLanguage::CSharp;
+    const auto cs_res = gandon::decompile_function(pe, "sub_140001000", 0x140001000, vcall_insns, opts);
+    if (!cs_res.ok || !contains(cs_res.text, "// C# class: ui.Widget") ||
+        !contains(cs_res.text, "public unsafe") || !contains(cs_res.text, "this.Update(5)")) {
+        fail("test_cpp_and_csharp_language_modes (C# vcall)", cs_res.text);
+    }
+
+    // 2. Cast & static function formatting across C, C++, C#
+    const std::vector<gandon::Instruction> arith_insns = {
+        {0x140002000, 3, "imul", "esi, edx", {}},
+        {0x140002003, 2, "add", "esi, edi", {}},
+        {0x140002005, 2, "mov", "eax, esi", {}},
+        {0x140002007, 1, "ret", "", {}},
+    };
+    gandon::DecompilerOptions arith_opts;
+    arith_opts.windows_abi = false;
+
+    arith_opts.language = gandon::DecompileLanguage::Cpp;
+    const auto cpp_arith = gandon::decompile_function(pe, "calc", 0x140002000, arith_insns, arith_opts);
+    if (!cpp_arith.ok || !contains(cpp_arith.text, "static_cast<uint32_t>(")) {
+        fail("test_cpp_and_csharp_language_modes (C++ cast)", cpp_arith.text);
+    }
+
+    arith_opts.language = gandon::DecompileLanguage::CSharp;
+    const auto cs_arith = gandon::decompile_function(pe, "calc", 0x140002000, arith_insns, arith_opts);
+    if (!cs_arith.ok || !contains(cs_arith.text, "public static unsafe long calc(") || !contains(cs_arith.text, "(uint)(")) {
+        fail("test_cpp_and_csharp_language_modes (C# cast)", cs_arith.text);
+    }
+}
 } // namespace
 
 int main() {
@@ -305,6 +372,7 @@ int main() {
     test_interprocedural_arg_count_from_callee();
     test_stdcall_convention_from_ret_imm();
     test_unsupported_architecture_is_rejected();
+    test_cpp_and_csharp_language_modes();
     std::puts("decompiler tests passed");
     return 0;
 }

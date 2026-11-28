@@ -6,12 +6,27 @@
 #include <functional>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace gandon {
 
+enum class DecompileLanguage : std::uint8_t {
+    C = 0,
+    Cpp = 1,
+    CSharp = 2,
+};
+
+struct VtableMethodRef {
+    std::string class_name;
+    std::size_t slot{0};
+    std::uint64_t vtable_va{0};
+};
+
 // Options for the structured pseudocode generator.
 struct DecompilerOptions {
+    // Target output language: C, C++, or C#.
+    DecompileLanguage language{DecompileLanguage::Cpp};
     // true: Microsoft x64 ABI (rcx, rdx, r8, r9). false: System V AMD64 ABI.
     bool windows_abi{true};
     // Prefix every emitted statement with its source address as a comment.
@@ -26,6 +41,10 @@ struct DecompilerOptions {
     // parameters even when the caller does not set every argument register in
     // this block. Return a negative value when nothing is known.
     std::function<int(std::uint64_t)> arg_count_of;
+    // Optional C++ RTTI / vtable metadata (populated automatically by decompile_function_at).
+    std::unordered_map<std::uint64_t, std::string> vtable_class_at;
+    std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> vtable_methods;
+    std::unordered_map<std::uint64_t, VtableMethodRef> method_owner;
 };
 
 struct DecompileResult {
@@ -54,6 +73,7 @@ DecompileResult decompile_function(const BinaryImage& image, const std::string& 
 DecompileResult decompile_function_at(const AnalysisDatabase& database, std::uint64_t address,
                                       bool address_comments = false,
                                       const std::function<std::string(std::uint64_t)>& user_names = {},
-                                      const std::set<std::uint64_t>* noreturn_functions = nullptr);
+                                      const std::set<std::uint64_t>* noreturn_functions = nullptr,
+                                      DecompileLanguage language = DecompileLanguage::Cpp);
 
 } // namespace gandon

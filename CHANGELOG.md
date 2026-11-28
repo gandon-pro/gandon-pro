@@ -1,3 +1,11 @@
+## 3.5 — Multi-language decompiler (C / C++ / C#), F5 chooser dialog, and RTTI reconstruction
+
+- Add selectable target language (`DecompileLanguage::C`, `DecompileLanguage::Cpp`, `DecompileLanguage::CSharp`) in `gandon::decompile_function` / `decompile_function_at`, CLI (`gandon_decompile --c | --cpp | --cs`), GUI (`Tools -> Decompiler Language` + editor context menu), and MCP (`gandon_decompile` `"language": "c" | "cpp" | "csharp"`).
+- Add IDA-style dark-themed modal `Decompile function` dialog on `F5` (`Decompile to C`, `Decompile to C++`, `Decompile to C#`) matching the workspace theme.
+- Add C++20 & C# pseudocode emitters: MSVC name demangling (`dbghelp`), RTTI vtable/method resolution (`this->Method(...)` / `this.Method(...)`), constructor vtable-store detection, `static_cast` / `reinterpret_cast` (C++), `public static unsafe` / `public unsafe` with C# scalar/pointer types (`byte`, `ushort`, `uint`, `ulong`, `long`, `nint`) and dot-qualified calls (C#).
+
+Validation: x64 Release GUI/CLI built with Capstone + Unicorn (`x86;aarch64`); CTest 5/5 passed (including `gandon_decompiler_tests` for C, C++, and C# modes and `gandon_mcp_tests`).
+
 ## 3.4 — 38-tool MCP server, IDA-style debugger panels, PDB loader and Patch Manager
 
 - Expand the built-in Streamable HTTP MCP server from 25 to 38 `gandon_*` tools, adding Local Types (`gandon_list_types`, `gandon_define_type`, `gandon_set_prototype`), live debugger control (`gandon_dbg_status`, `gandon_dbg_regs`, `gandon_dbg_bp`, `gandon_dbg_step`, `gandon_dbg_read_mem`), Unicorn emulation (`gandon_emu_run`, `gandon_emu_regs`), PDB symbol loading (`gandon_load_pdb`), and patching (`gandon_list_patches`, `gandon_assemble_patch`).

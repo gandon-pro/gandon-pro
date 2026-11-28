@@ -6,6 +6,7 @@
 // continue, goto only as a last resort) -> C-like text.
 #include "gandon/decompiler.hpp"
 #include "gandon/image_tables.hpp"
+#include "gandon/rtti.hpp"
 #include "gandon/stack_frame.hpp"
 
 #include <algorithm>
@@ -18,11 +19,20 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <dbghelp.h>
+#endif
 
 namespace gandon {
 namespace {
@@ -3802,11 +3812,16 @@ std::string type_for_size(int size) {
 
 class Printer {
 public:
-    Printer(Ctx& cx, std::uint32_t entry_live) : cx_(cx) {
+    Printer(Ctx& cx, std::uint32_t entry_live, std::string this_class = {}, std::uint64_t this_vtable = 0)
+        : cx_(cx), this_class_(std::move(this_class)), this_vtable_(this_vtable) {
+        const bool use_this = oop_mode() && !this_class_.empty();
         int arg = 1;
         for (const auto& reg : cx.arg_regs) {
             const int idx = register_index(reg);
-            if (idx >= 0 && (entry_live & (1u << idx))) { rename_[reg] = "a" + std::to_string(arg); arg_count_ = arg; }
+            if (idx >= 0 && (entry_live & (1u << idx))) {
+                rename_[reg] = (use_this && arg == 1) ? "this" : ("a" + std::to_string(arg));
+                arg_count_ = arg;
+            }
             ++arg;
         }
         if (!g_arm && cx.options.windows_abi)
@@ -3817,6 +3832,100 @@ public:
                     arg_count_ = (std::max)(arg_count_, i + 1);
                 }
         // Parameters in between that are not live still need a slot in the prototype.
+    }
+
+    DecompileLanguage language() const { return cx_.options.language; }
+    bool c_mode() const { return language() == DecompileLanguage::C; }
+    bool cpp_mode() const { return language() == DecompileLanguage::Cpp; }
+    bool cs_mode() const { return language() == DecompileLanguage::CSharp; }
+    bool oop_mode() const { return cpp_mode() || cs_mode(); }
+    bool has_this() const { return oop_mode() && !this_class_.empty(); }
+
+    static std::string cs_type_for_size(int size, bool is_signed = false) {
+        switch (size) {
+        case 1: return is_signed ? "sbyte" : "byte";
+        case 2: return is_signed ? "short" : "ushort";
+        case 4: return is_signed ? "int" : "uint";
+        case 8: return is_signed ? "long" : "ulong";
+        default: return "nint";
+        }
+    }
+
+    static std::string cs_map_type(const std::string& t) {
+        if (t == "uint8_t") return "byte";
+        if (t == "int8_t") return "sbyte";
+        if (t == "uint16_t") return "ushort";
+        if (t == "int16_t") return "short";
+        if (t == "uint32_t" || t == "DWORD" || t == "ULONG" || t == "UINT") return "uint";
+        if (t == "int32_t" || t == "INT" || t == "BOOL") return "int";
+        if (t == "uint64_t" || t == "ULONGLONG" || t == "SIZE_T") return "ulong";
+        if (t == "int64_t" || t == "LONGLONG") return "long";
+        if (t == "__m128") return "Vector128<float>";
+        if (t == "long double") return "double";
+        if (is_pointerish_type(t)) return "nint";
+        return t;
+    }
+
+    std::string lang_type_for_size(int size) const {
+        return cs_mode() ? cs_type_for_size(size, false) : type_for_size(size);
+    }
+
+    std::string lang_fp_type(int fp) const {
+        const std::string t = fp_type_name(fp);
+        return cs_mode() ? cs_map_type(t) : t;
+    }
+
+    static std::string cs_qualify(std::string s) {
+        std::size_t pos = 0;
+        while ((pos = s.find("::", pos)) != std::string::npos) {
+            s.replace(pos, 2, ".");
+            pos += 1;
+        }
+        return s;
+    }
+
+    static std::string demangle_name_only(const std::string& s) {
+        if (s.empty()) return s;
+#ifdef _WIN32
+        if (s[0] == '?') {
+            char buf[2048]{};
+            if (UnDecorateSymbolName(s.c_str(), buf, sizeof(buf), UNDNAME_NAME_ONLY) != 0 && buf[0]) {
+                return buf;
+            }
+        }
+#endif
+        if (s.rfind("??0", 0) == 0 || s.rfind("??1", 0) == 0 || s[0] == '?') {
+            const bool is_ctor = s.rfind("??0", 0) == 0;
+            const bool is_dtor = s.rfind("??1", 0) == 0;
+            std::string body = (is_ctor || is_dtor) ? s.substr(3) : s.substr(1);
+            auto end = body.find("@@");
+            if (end != std::string::npos) body = body.substr(0, end);
+            std::vector<std::string> parts;
+            std::string cur;
+            for (char c : body) {
+                if (c == '@') { if (!cur.empty()) parts.push_back(cur); cur.clear(); }
+                else cur.push_back(c);
+            }
+            if (!cur.empty()) parts.push_back(cur);
+            if (!parts.empty()) {
+                std::string out;
+                for (auto it = parts.rbegin(); it != parts.rend(); ++it) {
+                    if (!out.empty()) out += "::";
+                    out += *it;
+                }
+                if (is_ctor) out += "::" + parts.front();
+                else if (is_dtor) out += "::~" + parts.front();
+                return out;
+            }
+        }
+        return s;
+    }
+
+    std::string fmt_cast(const std::string& type, const std::string& inner) const {
+        if (c_mode()) return "(" + type + ")" + inner;
+        if (cs_mode()) return "(" + cs_map_type(type) + ")(" + inner + ")";
+        if (is_pointerish_type(type)) return "reinterpret_cast<" + type + ">(" + inner + ")";
+        return "static_cast<" + type + ">(" + inner + ")";
     }
 
     std::string param_fp_type(int number) {
@@ -3840,8 +3949,11 @@ public:
                 if (!n.empty()) return is_code_address(image, v) ? n : "&" + n;
             }
             if (const auto s = read_c_string(image, v); s && s->size() >= 4) return "\"" + escape_c(*s) + "\"";
-            if (const auto w = read_wide_string(image, v); w && w->size() >= 4) return "L\"" + escape_c(*w) + "\"";
-            if (!pie) return "(void*)" + hex(v);
+            if (const auto w = read_wide_string(image, v); w && w->size() >= 4)
+                return (cs_mode() ? "\"" : "L\"") + escape_c(*w) + "\"";
+            if (!pie) return cpp_mode() ? ("reinterpret_cast<void*>(" + hex(v) + ")")
+                            : cs_mode() ? ("(nint)" + hex(v))
+                            : ("(void*)" + hex(v));
         }
         return hex(v);
     }
@@ -3849,7 +3961,7 @@ public:
     std::string frame_name(std::int64_t off, int size) {
         if (const auto alias = cx_.param_slot.find(off); alias != cx_.param_slot.end()) {
             used_params_.insert(alias->second);
-            return "a" + std::to_string(alias->second);
+            return (has_this() && alias->second == 1) ? "this" : ("a" + std::to_string(alias->second));
         }
         char buf[48];
         if (off < 0) std::snprintf(buf, sizeof buf, "var_%llX", static_cast<unsigned long long>(-off));
@@ -3858,7 +3970,7 @@ public:
         auto& entry = declared_frame_[name];
         entry = (std::max)(entry, size);
         const int declared = cx_.frame_sizes.count(off) ? cx_.frame_sizes[off] : size;
-        if (size != declared && declared != 0) return "*(" + type_for_size(size) + "*)&" + name;
+        if (size != declared && declared != 0) return "*(" + lang_type_for_size(size) + "*)&" + name;
         return name;
     }
 
@@ -3904,7 +4016,7 @@ public:
         (void)lvalue;
         const int size = e->size;
         const EP& addr = e->a[0];
-        const std::string elem = e->fp ? fp_type_name(e->fp) : type_for_size(size);
+        const std::string elem = e->fp ? lang_fp_type(e->fp) : lang_type_for_size(size);
         if (addr->kind == K::Frame) {
             const std::string name = frame_name(frame_offset(addr), size);
             if (e->fp && name.find_first_of("*(") == std::string::npos && name.rfind("a", 0) != 0) frame_fp_[name] = (std::max)(frame_fp_[name], static_cast<int>(e->fp));
@@ -3915,7 +4027,7 @@ public:
             if (cx_.options.name_of) { const auto n = cx_.options.name_of(a); if (!n.empty()) return n; }
             static const char* prefix[] = {"", "byte_", "word_", "", "dword_", "", "", "", "qword_"};
             char buf[64]; std::snprintf(buf, sizeof buf, "%s%llX", size <= 8 ? prefix[size] : "data_", static_cast<unsigned long long>(a));
-            if (size == 3 || size == 5 || size == 6 || size == 7) return "*(" + type_for_size(size) + "*)" + hex(a);
+            if (size == 3 || size == 5 || size == 6 || size == 7) return "*(" + lang_type_for_size(size) + "*)" + hex(a);
             if (e->fp) return "*(" + elem + "*)" + hex(a);
             return buf;
         }
@@ -3924,15 +4036,46 @@ public:
             const char* w = size == 1 ? "byte" : size == 2 ? "word" : size == 4 ? "dword" : "qword";
             return "__read" + seg + w + "(" + expr(addr->a[0]) + ")";
         }
-        // base + index*scale  ->  ((T*)base)[index]
+        // base + index*scale  ->  ((T*)base)[index]  (or reinterpret_cast<T*>(base)[index] in C++)
         if (addr->kind == K::Bin && addr->name == "+") {
             const EP& l = addr->a[0]; const EP& r = addr->a[1];
             if (r->kind == K::Bin && r->name == "*" && is_const(r->a[1]) && static_cast<int>(r->a[1]->imm) == size && !is_const(l))
-                return "((" + elem + "*)" + expr(l, 13) + ")[" + expr(r->a[0]) + "]";
+                return cpp_mode() ? ("reinterpret_cast<" + elem + "*>(" + expr(l) + ")[" + expr(r->a[0]) + "]")
+                     : cs_mode()  ? ("((" + elem + "*)(" + expr(l) + "))[" + expr(r->a[0]) + "]")
+                                  : ("((" + elem + "*)" + expr(l, 13) + ")[" + expr(r->a[0]) + "]");
             if (size == 1 && !is_const(r) && !is_const(l))
-                return "((uint8_t*)" + expr(l, 13) + ")[" + expr(r) + "]";
+                return cpp_mode() ? ("reinterpret_cast<uint8_t*>(" + expr(l) + ")[" + expr(r) + "]")
+                     : cs_mode()  ? ("((byte*)(" + expr(l) + "))[" + expr(r) + "]")
+                                  : ("((uint8_t*)" + expr(l, 13) + ")[" + expr(r) + "]");
         }
-        return "*(" + elem + "*)" + (addr->kind == K::Var || addr->kind == K::Call ? expr(addr, 13) : "(" + expr(addr) + ")");
+        const std::string ptr_expr = cpp_mode() ? expr(addr)
+                                   : cs_mode()  ? ("(" + expr(addr) + ")")
+                                                : ((addr->kind == K::Var || addr->kind == K::Call) ? expr(addr, 13) : ("(" + expr(addr) + ")"));
+        return cpp_mode() ? ("*reinterpret_cast<" + elem + "*>(" + ptr_expr + ")")
+                          : ("*(" + elem + "*)" + ptr_expr);
+    }
+
+    bool match_vptr_base(const EP& e, EP& out_obj, std::uint64_t& out_off) {
+        out_off = 0;
+        EP cur = e;
+        if (cur->kind == K::Cast) cur = cur->a[0];
+        if (cur->kind == K::Bin && cur->name == "+" && is_const(cur->a[1])) {
+            out_off = cur->a[1]->imm;
+            cur = cur->a[0];
+            if (cur->kind == K::Cast) cur = cur->a[0];
+        }
+        if (cur->kind == K::Deref && cur->a[0]) {
+            out_obj = cur->a[0];
+            return true;
+        }
+        if (cur->kind == K::Var) {
+            const std::string vn = var_text(cur);
+            if (const auto it = vptr_aliases_.find(vn); it != vptr_aliases_.end()) {
+                out_obj = it->second;
+                return true;
+            }
+        }
+        return false;
     }
 
     std::string expr(const EP& e, int parent = 0) {
@@ -3948,7 +4091,7 @@ public:
             return buf;
         }
         case K::Un: return paren(e->name + expr(e->a[0], 12), 12, parent);
-        case K::Cast: return paren("(" + e->name + ")" + expr(e->a[0], 12), 12, parent);
+        case K::Cast: return !c_mode() ? fmt_cast(e->name, expr(e->a[0])) : paren("(" + e->name + ")" + expr(e->a[0], 12), 12, parent);
         case K::Deref: return deref_text(e);
         case K::Tern: return paren(expr(e->a[0], 2) + " ? " + expr(e->a[1], 1) + " : " + expr(e->a[2], 1), 1, parent);
         case K::Intrin: {
@@ -3957,14 +4100,64 @@ public:
             return out + ")";
         }
         case K::Call: {
+            // Reconstruct C++/C# virtual calls: (*(vptr + slot*8))(obj, ...) -> obj->vfunc_slot(...) or obj.vfunc_slot(...)
+            if (oop_mode() && e->imm == 1 && !e->a.empty() && e->a[0]->kind == K::Deref && e->a.size() >= 2) {
+                EP obj;
+                std::uint64_t byte_off = 0;
+                if (match_vptr_base(e->a[0]->a[0], obj, byte_off)) {
+                    const std::string obj_s = expr(obj, 13);
+                    const std::string arg0_s = expr(e->a[1], 13);
+                    if (same(obj, e->a[1]) || obj_s == arg0_s) {
+                        const std::size_t ptr_sz = cx_.image.is_64_bit ? 8u : 4u;
+                        const std::size_t slot = static_cast<std::size_t>(byte_off / ptr_sz);
+                        std::string vname = "vfunc_" + std::to_string(slot);
+                        if (obj_s == "this" && this_vtable_ != 0) {
+                            if (const auto vit = cx_.options.vtable_methods.find(this_vtable_);
+                                vit != cx_.options.vtable_methods.end() && slot < vit->second.size() && cx_.options.name_of) {
+                                const std::string mname = demangle_name_only(cx_.options.name_of(vit->second[slot]));
+                                if (!mname.empty()) {
+                                    const auto sep = mname.rfind("::");
+                                    vname = (sep != std::string::npos) ? mname.substr(sep + 2) : mname;
+                                }
+                            }
+                        }
+                        std::string out = obj_s + (cs_mode() ? "." : "->") + vname + "(";
+                        for (std::size_t i = 2; i < e->a.size(); ++i) {
+                            out += (i > 2 ? ", " : "") + expr(e->a[i], 12);
+                        }
+                        return out + ")";
+                    }
+                }
+            }
+
             std::string out;
             std::size_t first = 0;
             const ApiProto* proto = nullptr;
+            bool emit_member = false;
+            std::string member_prefix;
             if (e->imm == 1) { out = "(" + expr(e->a[0], 0) + ")"; first = 1; }
             else {
                 out = strip_import_decoration(e->name);
+                if (oop_mode()) out = demangle_name_only(out);
                 if (const auto it = api_prototypes().find(out); it != api_prototypes().end()) proto = &it->second;
+                if (oop_mode() && e->a.size() >= 1) {
+                    const auto sep = out.rfind("::");
+                    if (sep != std::string::npos && out.rfind("std::", 0) != 0 && out.find("operator") == std::string::npos) {
+                        const auto& a0 = e->a[0];
+                        if (a0->kind == K::Var || a0->kind == K::Frame || a0->kind == K::Deref || a0->kind == K::Cast || a0->kind == K::Bin) {
+                            emit_member = true;
+                            std::string obj_s = expr(a0, 13);
+                            if (cs_mode()) member_prefix = ((a0->kind == K::Frame && !obj_s.empty() && obj_s[0] == '&') ? obj_s.substr(1) : obj_s) + ".";
+                            else if (a0->kind == K::Frame && !obj_s.empty() && obj_s[0] == '&') member_prefix = obj_s.substr(1) + ".";
+                            else member_prefix = obj_s + "->";
+                            out = member_prefix + out.substr(sep + 2);
+                            first = 1;
+                        }
+                    }
+                }
+                if (cs_mode() && !emit_member) out = cs_qualify(out);
             }
+            (void)emit_member;
             out += "(";
             for (std::size_t i = first; i < e->a.size(); ++i) {
                 std::string arg = expr(e->a[i], 12);
@@ -3974,7 +4167,9 @@ public:
                     const std::size_t pi = i - first;
                     if (pi < proto->params.size() && e->a[i]->kind != K::Const) {
                         const std::string pt = proto->params[pi];
-                        if (is_pointerish_type(pt) && e->a[i]->kind != K::Cast) arg = "(" + pt + ")" + arg;
+                        if (is_pointerish_type(pt) && e->a[i]->kind != K::Cast) {
+                            arg = !c_mode() ? fmt_cast(pt, arg) : ("(" + pt + ")" + arg);
+                        }
                     }
                 }
                 out += (i > first ? ", " : "") + arg;
@@ -4007,6 +4202,16 @@ public:
             } else lhs = deref_text(store_fp ? fderef(s.size, s.addr, store_fp) : deref(s.size, s.addr), true);
         } else return expr(s.value) + ";";
         const EP& v = s.value;
+        if (s.type == Stmt::T::Assign) {
+            if (v && v->kind == K::Deref && v->size == 8 && !v->a.empty()) vptr_aliases_[lhs] = v->a[0];
+            else vptr_aliases_.erase(lhs);
+        }
+        if (oop_mode() && s.type == Stmt::T::Store && v && v->kind == K::Const) {
+            if (const auto vit = cx_.options.vtable_class_at.find(v->imm); vit != cx_.options.vtable_class_at.end()) {
+                if (cs_mode()) return lhs + " = 0; // vtable: " + cs_qualify(vit->second);
+                return lhs + " = reinterpret_cast<uint64_t>(&" + vit->second + "::vftable);";
+            }
+        }
         // Give the destination local the API's return type when it captures a known call,
         // e.g. `HANDLE v3 = CreateFileW(...);` rather than `int64_t v3 = ...`.
         if (s.type == Stmt::T::Assign && v->kind == K::Call && v->imm != 1 && lhs.size() >= 2 &&
@@ -4047,7 +4252,7 @@ public:
                 else out << pad << node->text << "(" << (node->value ? expr(node->value) : "") << ");\n";
                 break;
             case Node::T::If: {
-                out << pad << "if ( " << expr(node->cond) << " )\n" << pad << "{\n";
+                out << pad << (oop_mode() ? "if (" : "if ( ") << expr(node->cond) << (oop_mode() ? ")\n" : " )\n") << pad << "{\n";
                 print_seq(node->body, indent + 1, out);
                 out << pad << "}\n";
                 if (!node->other.empty()) {
@@ -4066,7 +4271,7 @@ public:
                 break;
             }
             case Node::T::Switch:
-                out << pad << "switch ( " << expr(node->cond) << " )\n" << pad << "{\n";
+                out << pad << (oop_mode() ? "switch (" : "switch ( ") << expr(node->cond) << (oop_mode() ? ")\n" : " )\n") << pad << "{\n";
                 print_seq(node->body, indent + 1, out);
                 out << pad << "}\n"; break;
             case Node::T::Case: {
@@ -4077,12 +4282,12 @@ public:
                 break;
             }
             case Node::T::Loop:
-                out << pad << "while ( 1 )\n" << pad << "{\n"; print_seq(node->body, indent + 1, out); out << pad << "}\n"; break;
+                out << pad << (oop_mode() ? "while (true)\n" : "while ( 1 )\n") << pad << "{\n"; print_seq(node->body, indent + 1, out); out << pad << "}\n"; break;
             case Node::T::While:
-                out << pad << "while ( " << expr(node->cond) << " )\n" << pad << "{\n"; print_seq(node->body, indent + 1, out); out << pad << "}\n"; break;
+                out << pad << (oop_mode() ? "while (" : "while ( ") << expr(node->cond) << (oop_mode() ? ")\n" : " )\n") << pad << "{\n"; print_seq(node->body, indent + 1, out); out << pad << "}\n"; break;
             case Node::T::DoWhile:
                 out << pad << "do\n" << pad << "{\n"; print_seq(node->body, indent + 1, out); out << pad << "}\n"
-                    << pad << "while ( " << expr(node->cond) << " );\n"; break;
+                    << pad << (oop_mode() ? "while (" : "while ( ") << expr(node->cond) << (oop_mode() ? ");\n" : " );\n"); break;
             }
         }
     }
@@ -4095,22 +4300,24 @@ public:
             const std::string clean = name;
             if (clean.empty()) continue;
             const auto fp = frame_fp_.find(clean);
-            out << "    " << (fp != frame_fp_.end() ? fp_type_name(fp->second) : type_for_size(size ? size : 8)) << " " << clean << ";\n";
+            out << "    " << (fp != frame_fp_.end() ? lang_fp_type(fp->second) : lang_type_for_size(size ? size : 8)) << " " << clean << ";\n";
         }
         for (const auto& reg : used_regs_) {
             if (reg.size() >= 2 && reg[0] == 'a' && std::isdigit(static_cast<unsigned char>(reg[1]))) continue; // parameter
             const auto fp = reg_fp_.find(reg);
             std::string type = reg.rfind("xmm", 0) == 0 ? "__m128" : "int64_t";
             if (fp != reg_fp_.end() && fp->second) type = fp_type_name(fp->second);
+            if (cs_mode()) type = cs_map_type(type);
             out << "    " << type << " " << reg << ";\n";
         }
         std::map<int, std::string> by_number;
         for (const auto& [name, size] : temp_types_) {
             const auto fp = temp_fp_.find(name);
             const auto ct = temp_c_type_.find(name);
-            const std::string type = ct != temp_c_type_.end() ? ct->second
-                                   : fp != temp_fp_.end() && fp->second ? fp_type_name(fp->second)
-                                   : type_for_size(size ? size : 8);
+            std::string type = ct != temp_c_type_.end() ? ct->second
+                             : fp != temp_fp_.end() && fp->second ? fp_type_name(fp->second)
+                             : type_for_size(size ? size : 8);
+            if (cs_mode()) type = cs_map_type(type);
             by_number[std::stoi(name.substr(1))] = "    " + type + " " + name + ";\n";
         }
         for (const auto& [number, line] : by_number) out << line;
@@ -4119,6 +4326,9 @@ public:
 
 private:
     Ctx& cx_;
+    std::string this_class_;
+    std::uint64_t this_vtable_{0};
+    std::unordered_map<std::string, EP> vptr_aliases_;
     std::map<std::string, std::string> rename_;
     std::unordered_map<std::string, std::string> temp_names_;
     std::map<std::string, int> temp_types_;
@@ -4175,7 +4385,42 @@ DecompileResult decompile_function(const BinaryImage& image, const std::string& 
     structurer.count_gotos(body);
     result.goto_count = structurer.goto_count();
 
-    Printer printer(cx, entry_live);
+    const bool is_c = options.language == DecompileLanguage::C;
+    const bool is_cpp = options.language == DecompileLanguage::Cpp;
+    const bool is_cs = options.language == DecompileLanguage::CSharp;
+    const bool is_oop = is_cpp || is_cs;
+
+    std::string display_name = is_oop ? Printer::demangle_name_only(name) : name;
+    std::string this_class;
+    std::uint64_t this_vtable = 0;
+    if (is_oop) {
+        if (const auto mit = options.method_owner.find(start); mit != options.method_owner.end()) {
+            this_class = mit->second.class_name;
+            this_vtable = mit->second.vtable_va;
+        } else if (const auto sep = display_name.rfind("::"); sep != std::string::npos) {
+            this_class = display_name.substr(0, sep);
+        } else {
+            // Infer class from constructor vtable store: *(uint64_t*)a1 = vtable_va
+            std::function<void(const Seq&)> find_vptr = [&](const Seq& seq) {
+                for (const auto& nd : seq) {
+                    if (!this_class.empty()) return;
+                    if (nd->type == Node::T::Stmt && nd->stmt.type == Stmt::T::Store &&
+                        nd->stmt.value && nd->stmt.value->kind == K::Const) {
+                        if (const auto vit = options.vtable_class_at.find(nd->stmt.value->imm); vit != options.vtable_class_at.end()) {
+                            this_class = vit->second;
+                            this_vtable = nd->stmt.value->imm;
+                            return;
+                        }
+                    }
+                    find_vptr(nd->body);
+                    find_vptr(nd->other);
+                }
+            };
+            find_vptr(body);
+        }
+    }
+
+    Printer printer(cx, entry_live, this_class, this_vtable);
     std::ostringstream body_text;
     printer.print_seq(body, 1, body_text);
 
@@ -4186,18 +4431,48 @@ DecompileResult decompile_function(const BinaryImage& image, const std::string& 
         if ((ins.mnemonic == "ret" || ins.mnemonic == "retn") && !ins.operands.empty()) callee_cleanup = true;
 
     std::ostringstream out;
-    out << "// " << name << "  @ " << hex(start) << "\n";
+    out << "// " << (is_cs ? Printer::cs_qualify(display_name) : display_name) << "  @ " << hex(start) << "\n";
+    if (is_oop && !this_class.empty()) {
+        out << (is_cs ? "// C# class: " : "// C++ class: ") << (is_cs ? Printer::cs_qualify(this_class) : this_class);
+        if (this_vtable) out << " | vtable @ " << hex(this_vtable);
+        out << "\n";
+        if (is_cpp && display_name.find("::") == std::string::npos) display_name = this_class + "::" + display_name;
+    }
     const bool returns_value = cx.saw_return_value;
-    const char* return_type = cx.return_fp == 1 ? "float" : cx.return_fp == 2 ? "double" : cx.return_fp == 3 ? "long double" : returns_value ? "int64_t" : "void";
-    const std::string conv = g_arm ? "" : callee_cleanup ? " __stdcall " : options.windows_abi ? " __fastcall " : " ";
-    out << return_type << conv << name << "(";
-    for (int i = 1; i <= printer.arg_count(); ++i) {
+    if (is_cs) {
+        const char* cs_ret = cx.return_fp == 1 ? "float" : (cx.return_fp == 2 || cx.return_fp == 3) ? "double" : returns_value ? "long" : "void";
+        std::string method_name = Printer::cs_qualify(display_name);
+        if (!this_class.empty()) {
+            const std::string cls_prefix = Printer::cs_qualify(this_class) + ".";
+            if (method_name.rfind(cls_prefix, 0) == 0) method_name.erase(0, cls_prefix.size());
+        }
+        out << (this_class.empty() ? "public static unsafe " : "public unsafe ") << cs_ret << " " << method_name << "(";
+    } else {
+        const char* return_type = cx.return_fp == 1 ? "float" : cx.return_fp == 2 ? "double" : cx.return_fp == 3 ? "long double" : returns_value ? "int64_t" : "void";
+        const std::string conv = (g_arm || (is_cpp && !callee_cleanup)) ? " "
+                               : callee_cleanup ? " __stdcall "
+                               : options.windows_abi ? " __fastcall " : " ";
+        out << return_type << conv << display_name << "(";
+    }
+    const int first_param = (is_oop && !this_class.empty()) ? 2 : 1;
+    bool wrote_param = false;
+    for (int i = first_param; i <= printer.arg_count(); ++i) {
         const auto sz = cx.param_size.find(i);
         const std::string fp_type = printer.param_fp_type(i);
-        const char* type = sz == cx.param_size.end() || sz->second == 8 ? "int64_t" : sz->second == 4 ? "int32_t" : sz->second == 2 ? "uint16_t" : "uint8_t";
-        out << (i > 1 ? ", " : "") << (fp_type.empty() ? std::string(type) : fp_type) << " a" << i;
+        std::string type;
+        if (is_cs) {
+            type = !fp_type.empty() ? Printer::cs_map_type(fp_type)
+                 : sz == cx.param_size.end() || sz->second == 8 ? "long"
+                 : sz->second == 4 ? "int"
+                 : sz->second == 2 ? "ushort" : "byte";
+        } else {
+            const char* c_type = sz == cx.param_size.end() || sz->second == 8 ? "int64_t" : sz->second == 4 ? "int32_t" : sz->second == 2 ? "uint16_t" : "uint8_t";
+            type = fp_type.empty() ? std::string(c_type) : fp_type;
+        }
+        out << (wrote_param ? ", " : "") << type << " a" << i;
+        wrote_param = true;
     }
-    if (printer.arg_count() == 0) out << "void";
+    if (!wrote_param && is_c) out << "void";
     out << ")\n{\n";
     out << printer.declarations();
     out << body_text.str();
@@ -4217,15 +4492,46 @@ DecompileResult decompile_function(const BinaryImage& image, const std::string& 
 
 DecompileResult decompile_function_at(const AnalysisDatabase& database, std::uint64_t address, bool address_comments,
                                       const std::function<std::string(std::uint64_t)>& user_names,
-                                      const std::set<std::uint64_t>* noreturn_functions) {
+                                      const std::set<std::uint64_t>* noreturn_functions,
+                                      DecompileLanguage language) {
     const auto function = database.function_at(address);
     DecompileResult result;
     if (!function) { result.error = "No function contains this address."; return result; }
     const BinaryImage& image = database.image();
     DecompilerOptions options;
+    options.language = language;
     options.windows_abi = image.format == BinaryFormat::PE;
     if (noreturn_functions) options.is_noreturn = [noreturn_functions](std::uint64_t a) { return noreturn_functions->count(a) != 0; };
     options.address_comments = address_comments;
+
+    const bool oop_mode = language != DecompileLanguage::C;
+    if (oop_mode && image.format == BinaryFormat::PE) {
+        static std::mutex rtti_mu;
+        static std::uint64_t cached_base = 0;
+        static std::size_t cached_size = 0;
+        static std::uint64_t cached_entry = 0;
+        static std::vector<RttiClass> cached_rtti;
+        std::vector<RttiClass> classes;
+        {
+            std::lock_guard<std::mutex> lk(rtti_mu);
+            if (cached_base != image.image_base || cached_size != image.bytes.size() || cached_entry != image.entry_point) {
+                cached_rtti = recover_rtti(image);
+                cached_base = image.image_base;
+                cached_size = image.bytes.size();
+                cached_entry = image.entry_point;
+            }
+            classes = cached_rtti;
+        }
+        for (const auto& rc : classes) {
+            options.vtable_class_at[rc.vtable_va] = rc.name;
+            options.vtable_methods[rc.vtable_va] = rc.methods;
+            for (std::size_t slot = 0; slot < rc.methods.size(); ++slot) {
+                if (!options.method_owner.contains(rc.methods[slot])) {
+                    options.method_owner[rc.methods[slot]] = {rc.name, slot, rc.vtable_va};
+                }
+            }
+        }
+    }
     std::unordered_map<std::uint64_t, std::string> names;
     for (const auto& f : database.functions()) names[f.start] = f.name;
     std::unordered_map<std::uint64_t, std::string> slot_names;
@@ -4254,6 +4560,14 @@ DecompileResult decompile_function_at(const AnalysisDatabase& database, std::uin
         if (found != slot_names.end()) names[f.start] = found->second;
     }
     for (const auto& sym : image.symbols) if (!sym.name.empty() && !names.contains(sym.address)) names[sym.address] = sym.name;
+    if (oop_mode) {
+        for (const auto& [mva, mref] : options.method_owner) {
+            auto it = names.find(mva);
+            if (it == names.end() || it->second.rfind("sub_", 0) == 0) {
+                names[mva] = mref.class_name + "::vfunc_" + std::to_string(mref.slot);
+            }
+        }
+    }
     options.name_of = [names = std::move(names), user_names](std::uint64_t a) -> std::string {
         if (user_names) { auto custom = user_names(a); if (!custom.empty()) return custom; }
         const auto it = names.find(a); return it == names.end() ? std::string() : it->second;

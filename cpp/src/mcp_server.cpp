@@ -412,11 +412,14 @@ struct McpServer::Impl {
     }
 
     std::string tool_decompile(const JsonValue& args) const {
-        if (!cb.decompile_at) throw ToolError("decompiler unavailable");
+        if (!cb.decompile_at && !cb.decompile_at_lang) throw ToolError("decompiler unavailable");
         const auto text = args.find("address") ? args.find("address")->as_string() : std::string();
         const auto address = resolve_or_throw(text);
         const bool comments = args.find("address_comments") && args.find("address_comments")->as_bool();
-        const auto res = cb.decompile_at(address, comments);
+        const auto lang = args.find("language") ? args.find("language")->as_string() : std::string();
+        const auto res = (!lang.empty() && cb.decompile_at_lang) ? cb.decompile_at_lang(address, comments, lang)
+                         : cb.decompile_at ? cb.decompile_at(address, comments)
+                         : cb.decompile_at_lang(address, comments, lang);
         if (!res.has_binary) throw ToolError("no binary is open");
         std::ostringstream out;
         out << "{\"address\":\"" << hex_u64(address) << "\",\"decompiled\":" << (res.ok ? "true" : "false") << ",";
@@ -790,7 +793,7 @@ struct McpServer::Impl {
             {"gandon_list_functions", "List discovered functions (start, name), paginated with offset/limit.", "{\"type\":\"object\",\"properties\":{\"offset\":{\"type\":\"integer\"},\"limit\":{\"type\":\"integer\"}}}"},
             {"gandon_disasm", "Disassemble instructions starting at an address.", "{\"type\":\"object\",\"properties\":{\"address\":{\"type\":\"string\"},\"count\":{\"type\":\"integer\"}},\"required\":[\"address\"]}"},
             {"gandon_listing", "Full IDA-style text listing of the function containing an address.", kAddrSchema},
-            {"gandon_decompile", "Decompile one function (x86/x64) to C-like pseudocode.", "{\"type\":\"object\",\"properties\":{\"address\":{\"type\":\"string\"},\"address_comments\":{\"type\":\"boolean\"}},\"required\":[\"address\"]}"},
+            {"gandon_decompile", "Decompile one function (x86/x64) to C, C++, or C# pseudocode.", "{\"type\":\"object\",\"properties\":{\"address\":{\"type\":\"string\"},\"address_comments\":{\"type\":\"boolean\"},\"language\":{\"type\":\"string\",\"enum\":[\"c\",\"cpp\",\"csharp\"]}},\"required\":[\"address\"]}"},
             {"gandon_decompile_to_file", "Decompile a range of functions directly to a file on disk.", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"offset\":{\"type\":\"integer\"},\"limit\":{\"type\":\"integer\"},\"address_comments\":{\"type\":\"boolean\"}},\"required\":[\"path\"]}"},
             {"gandon_xrefs", "Cross-references to, from, or both for an address.", "{\"type\":\"object\",\"properties\":{\"address\":{\"type\":\"string\"},\"direction\":{\"type\":\"string\",\"enum\":[\"to\",\"from\",\"both\"]}},\"required\":[\"address\"]}"},
             {"gandon_strings", "Strings embedded in the binary.", "{\"type\":\"object\",\"properties\":{\"min_length\":{\"type\":\"integer\"}}}"},
